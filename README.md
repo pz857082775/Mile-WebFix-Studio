@@ -56,10 +56,10 @@ OWASP Top10 / API Top10 / CWE Top25 / 逻辑 / 数据 / 算法 的安全规则�
 
 | 形态 | 文件 | 说明 |
 | --- | --- | --- |
-| 桌面 · 安装版 | [`release/desktop/WebFixStudio-1.0.0-x64-setup.exe`](release/desktop/) | NSIS 安装包（推荐） |
-| 桌面 · 安装版 | [`release/desktop/WebFixStudio-1.0.0-x64.msi`](release/desktop/) | MSI 安装包 |
-| 桌面 · 便携版 | [`release/desktop/WebFixStudio-1.0.0-x64-portable.exe`](release/desktop/) | 免安装，双击运行 |
-| 网页 · 单文件 | [`release/web/webfix-server.exe`](release/web/) | 双击后浏览器打开 `http://127.0.0.1:8787` |
+| 桌面 · 安装版 | [`WebFixStudio-1.0.0-x64-setup.exe`](release/desktop/WebFixStudio-1.0.0-x64-setup.exe) | NSIS 安装包（推荐） |
+| 桌面 · 安装版 | [`WebFixStudio-1.0.0-x64.msi`](release/desktop/WebFixStudio-1.0.0-x64.msi) | MSI 安装包 |
+| 桌面 · 便携版 | [`WebFixStudio-1.0.0-x64-portable.exe`](release/desktop/WebFixStudio-1.0.0-x64-portable.exe) | 免安装，双击运行 |
+| 网页 · 单文件 | [`webfix-server.exe`](release/web/webfix-server.exe) | 双击后浏览器打开 `http://127.0.0.1:8787` |
 
 内置演示靶场 `/demo`（含登录墙 `/demo/admin`），开箱即可体验全部功能。
 
