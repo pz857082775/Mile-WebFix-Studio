@@ -1,0 +1,34 @@
+[package]
+name = "webfix-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "WebFix Studio 核心：网页体检 / 全站爬行 / 巡检代理 / 修复四件套 / AI 增强 / 扩展协同编排"
+
+[lib]
+name = "webfix_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "webfix-server"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip", "deflate", "brotli", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+url = "2"
+base64 = "0.22"
+sha1 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
+rust-embed = "8"
+mime_guess = "2"
+percent-encoding = "2"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

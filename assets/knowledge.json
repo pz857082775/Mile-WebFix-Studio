@@ -1,0 +1,4193 @@
+{
+ "version": 1,
+ "generatedFrom": "webfix-studio/lib/rules.js + knowledge.js",
+ "rules": {
+  "sec-missing-csp": {
+   "category": "security",
+   "severity": "medium",
+   "title": "缺少 Content-Security-Policy（XSS 防线缺失）",
+   "rootCause": "响应头未设置 CSP，浏览器无法限制脚本与资源加载来源；一旦页面存在注入点，攻击脚本可直接执行并外带数据。",
+   "fix": {
+    "frontend": "// 无需前端改动；若页面有内联 <script> 或 onclick，先迁移到外部 .js 文件，否则严格 CSP 会拦截业务脚本。",
+    "backend": "// Express：使用 helmet 下发 CSP\nimport helmet from 'helmet';\napp.use(helmet.contentSecurityPolicy({\n  directives: {\n    defaultSrc: [\"'self'\"],\n    scriptSrc: [\"'self'\"],\n    objectSrc: [\"'none'\"],\n    upgradeInsecureRequests: [],\n  },\n}));\n\n// Nginx 等价配置：\n// add_header Content-Security-Policy \"default-src 'self'; script-src 'self'; object-src 'none'\" always;"
+   },
+   "verify": [
+    "curl -I https://目标地址 | grep -i content-security-policy 确认响应头存在",
+    "打开 DevTools Console，正常业务无 CSP 拦截报错",
+    "在输入框注入 <script>alert(1)</script>，确认被浏览器拒绝执行"
+   ],
+   "guard": "# nginx.conf：先用 Report-Only 灰度上线，观察一周无误杀再切换为强制模式\nadd_header Content-Security-Policy-Report-Only \"default-src 'self'; report-uri /csp-report\" always;\n\n# 后端收集违规报告，及时发现新增的内联脚本/第三方依赖\napp.post('/csp-report', express.json({ type: ['json', 'application/csp-report'] }), (req, res) => {\n  logger.warn('CSP violation', req.body);\n  res.sendStatus(204);\n});",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -10,6 +10,7 @@ server {\n     listen 443 ssl;\n     server_name example.com;\n+    add_header Content-Security-Policy \"default-src 'self'; script-src 'self'; object-src 'none'\" always;\n \n     location / {\n         proxy_pass http://127.0.0.1:3000;"
+  },
+  "sec-missing-xfo": {
+   "category": "security",
+   "severity": "medium",
+   "title": "缺少点击劫持防护（X-Frame-Options / frame-ancestors）",
+   "rootCause": "页面可被任意第三方站点用 iframe 嵌套，攻击者可叠加透明层诱导用户点击（点击劫持），或伪造界面骗取操作。",
+   "fix": {
+    "frontend": "// 无需前端改动。若业务确实需要被嵌入，改为 CSP frame-ancestors 白名单而不是完全放开。",
+    "backend": "// Express\napp.use(helmet.frameguard({ action: 'deny' }));\n\n// Nginx\n// add_header X-Frame-Options \"DENY\" always;\n// add_header Content-Security-Policy \"frame-ancestors 'none'\" always;"
+   },
+   "verify": [
+    "curl -I https://目标地址 | grep -i x-frame-options 应为 DENY 或 SAMEORIGIN",
+    "本地写一个 <iframe src=\"目标地址\"> 的测试页，确认浏览器拒绝加载"
+   ],
+   "guard": "// 中间件统一兜底，防止个别路由遗漏\napp.use((req, res, next) => {\n  res.setHeader('X-Frame-Options', 'DENY');\n  next();\n});",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -10,6 +10,8 @@ server {\n     listen 443 ssl;\n     server_name example.com;\n+    add_header X-Frame-Options \"DENY\" always;\n+    add_header Content-Security-Policy \"frame-ancestors 'none'\" always;\n \n     location / {"
+  },
+  "sec-missing-xcto": {
+   "category": "security",
+   "severity": "low",
+   "title": "缺少 X-Content-Type-Options: nosniff",
+   "rootCause": "浏览器会对响应做 MIME 嗅探，攻击者上传的「图片」可能被当作脚本执行（MIME 混淆攻击）。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// Express\napp.use(helmet.noSniff());\n\n// Nginx\n// add_header X-Content-Type-Options \"nosniff\" always;"
+   },
+   "verify": [
+    "curl -I https://目标地址 | grep -i x-content-type-options 应为 nosniff"
+   ],
+   "guard": "// 上传接口同时校验文件真实类型（magic bytes），不要只信扩展名\nimport { fileTypeFromBuffer } from 'file-type';\nconst type = await fileTypeFromBuffer(buf);\nif (!['image/png', 'image/jpeg'].includes(type?.mime)) throw new Error('文件类型不允许');",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -10,6 +10,7 @@ server {\n     listen 443 ssl;\n     server_name example.com;\n+    add_header X-Content-Type-Options \"nosniff\" always;\n \n     location / {"
+  },
+  "sec-missing-hsts": {
+   "category": "security",
+   "severity": "medium",
+   "title": "HTTPS 站点缺少 HSTS",
+   "rootCause": "未设置 Strict-Transport-Security，用户首次访问或手动输入 http:// 时可能被 SSL 剥离中间人攻击降级为明文。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// Express（仅在全站 HTTPS 就绪后开启）\napp.use(helmet.hsts({ maxAge: 31536000, includeSubDomains: true }));\n\n// Nginx\n// add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\" always;"
+   },
+   "verify": [
+    "curl -I https://目标地址 | grep -i strict-transport-security",
+    "浏览器访问 http://目标地址，确认自动 301 到 https 且后续直接走 https"
+   ],
+   "guard": "# 先短 max-age 灰度，确认所有子域都支持 HTTPS 后再加长并申请 preload\nadd_header Strict-Transport-Security \"max-age=300\" always;",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -10,6 +10,7 @@ server {\n     listen 443 ssl;\n     server_name example.com;\n+    add_header Strict-Transport-Security \"max-age=31536000; includeSubDomains\" always;\n \n     location / {"
+  },
+  "sec-server-disclosure": {
+   "category": "security",
+   "severity": "low",
+   "title": "Server / X-Powered-By 泄露技术栈与版本",
+   "rootCause": "响应头暴露了服务器软件与版本（如 nginx/1.18、PHP/5.6），攻击者可据此挑选已知 CVE 定向攻击。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// Express\napp.disable('x-powered-by');\n\n// Nginx：隐藏版本号\n// server_tokens off;\n// 更多头可用 headers_more 模块：more_clear_headers Server;"
+   },
+   "verify": [
+    "curl -I https://目标地址，确认不再出现版本号信息"
+   ],
+   "guard": "# CI 中加一条响应头检查，防止配置回退\ncurl -sI https://staging.example.com | grep -Ei 'x-powered-by|server: .+/[0-9]' && exit 1 || true",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -1,5 +1,6 @@\n http {\n+    server_tokens off;\n     include mime.types;"
+  },
+  "sec-cookie-flags": {
+   "category": "security",
+   "severity": "high",
+   "title": "会话 Cookie 缺少 HttpOnly / Secure / SameSite",
+   "rootCause": "Cookie 无 HttpOnly 时 XSS 可直接窃取会话；无 Secure 时明文 HTTP 会泄露会话；无 SameSite 时跨站请求可携带会话（CSRF 帮凶）。",
+   "fix": {
+    "frontend": "// 前端不要再用 document.cookie 读取会话凭据；改用后端下发的 HttpOnly Cookie。",
+    "backend": "// Express：登录成功后下发会话 Cookie\nres.cookie('session', token, {\n  httpOnly: true,\n  secure: true,          // 仅 HTTPS 传输\n  sameSite: 'lax',       // 跨站不携带，防 CSRF\n  maxAge: 3600_000,\n  path: '/',\n});\n\n// Nginx 代理层兜底（已有 Cookie 补旗标）：\n// proxy_cookie_path / \"/; HTTPOnly; Secure; SameSite=Lax\";"
+   },
+   "verify": [
+    "DevTools → Application → Cookies，确认 HttpOnly/Secure/SameSite 三列均已勾选",
+    "在 Console 执行 document.cookie，确认读不到会话值",
+    "从第三方页面发起跨站请求，确认浏览器不再携带该 Cookie"
+   ],
+   "guard": "// 统一封装 setSession，禁止各处手写 Set-Cookie\nexport function setSession(res, token) {\n  res.cookie('session', token, { httpOnly: true, secure: true, sameSite: 'lax' });\n}\n// ESLint 自定义规则：禁止 res.setHeader('Set-Cookie', ...) 绕过封装",
+   "diff": "--- a/src/auth.js\n+++ b/src/auth.js\n@@ -12,7 +12,11 @@ export function login(req, res) {\n   const token = signToken(user);\n-  res.setHeader('Set-Cookie', 'session=' + token);\n+  res.cookie('session', token, {\n+    httpOnly: true,\n+    secure: true,\n+    sameSite: 'lax',\n+  });\n   res.json({ ok: true });\n }"
+  },
+  "sec-cors-wildcard": {
+   "category": "security",
+   "severity": "medium",
+   "title": "CORS 配置为通配符 *",
+   "rootCause": "Access-Control-Allow-Origin: * 允许任意站点读取接口响应；若接口返回用户数据，等于向全网开放。带凭据时浏览器虽拒绝 *，但配置本身说明缺少来源白名单。",
+   "fix": {
+    "frontend": "// 前端无需改动；确认 fetch 不再依赖跨域读取他人接口。",
+    "backend": "// Express：按白名单回显 Origin\nconst ALLOWED = new Set(['https://app.example.com']);\napp.use((req, res, next) => {\n  const origin = req.headers.origin;\n  if (origin && ALLOWED.has(origin)) {\n    res.setHeader('Access-Control-Allow-Origin', origin);\n    res.setHeader('Vary', 'Origin');\n  }\n  next();\n});"
+   },
+   "verify": [
+    "curl -H \"Origin: https://evil.example\" -I https://目标/api，确认响应不回显该 Origin",
+    "curl -H \"Origin: https://app.example.com\" -I https://目标/api，确认白名单来源正常"
+   ],
+   "guard": "// 配置中心化，新增域名走评审\n// config/cors.js\nexport const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || '').split(',').filter(Boolean);",
+   "diff": "--- a/src/app.js\n+++ b/src/app.js\n@@ -5,7 +5,12 @@ import express from 'express';\n const app = express();\n-app.use(cors({ origin: '*' }));\n+const ALLOWED = new Set(['https://app.example.com']);\n+app.use(cors({\n+  origin(origin, cb) { cb(null, ALLOWED.has(origin)); },\n+  credentials: true,\n+}));"
+  },
+  "sec-mixed-content": {
+   "category": "security",
+   "severity": "medium",
+   "title": "HTTPS 页面引用 HTTP 资源（混合内容）",
+   "rootCause": "加密页面中加载明文资源，中间人可篡改脚本/图片注入恶意代码，浏览器也会直接拦截部分资源导致功能损坏。",
+   "fix": {
+    "frontend": "<!-- 把所有 http:// 资源升级为 https://；第三方不支持 HTTPS 的直接换供应商 -->\n<script src=\"https://cdn.example.com/lib.js\"></script>\n<img src=\"https://img.example.com/a.png\">",
+    "backend": "// 下发 upgrade-insecure-requests，让浏览器自动升级站内明文请求\n// Content-Security-Policy: upgrade-insecure-requests\n// 同时服务端 301：http → https"
+   },
+   "verify": [
+    "DevTools Console 无 Mixed Content 警告",
+    "全站搜索 src=\"http:// 与 href=\"http://，确认清零"
+   ],
+   "guard": "// CI 静态检查：构建产物中不允许出现明文资源引用\ngrep -rE '(src|href|action)=\"http://' dist/ && exit 1 || true",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -4,7 +4,7 @@\n-  <script src=\"http://cdn.example.com/lib.js\"></script>\n+  <script src=\"https://cdn.example.com/lib.js\"></script>"
+  },
+  "sec-form-http": {
+   "category": "security",
+   "severity": "high",
+   "title": "表单通过明文 HTTP 提交",
+   "rootCause": "表单 action 指向 http://，账号密码等数据在链路上明文传输，可被嗅探或中间人篡改。",
+   "fix": {
+    "frontend": "<!-- action 改为 https，或直接用相对路径继承当前协议 -->\n<form action=\"/api/login\" method=\"POST\">",
+    "backend": "// Nginx：全站强制 HTTPS\nserver {\n  listen 80;\n  return 301 https://$host$request_uri;\n}"
+   },
+   "verify": [
+    "DevTools Network 中确认登录请求走 https 且无降级",
+    "用 http:// 访问站点，确认被 301 到 https"
+   ],
+   "guard": "// 前端构建期检查：禁止出现 action=\"http://\n// eslint-plugin-html 或自定义脚本扫描模板",
+   "diff": "--- a/public/login.html\n+++ b/public/login.html\n@@ -8,7 +8,7 @@\n-<form action=\"http://example.com/api/login\" method=\"POST\">\n+<form action=\"/api/login\" method=\"POST\">"
+  },
+  "sec-password-http": {
+   "category": "security",
+   "severity": "high",
+   "title": "HTTP 页面存在密码输入框",
+   "rootCause": "页面本身未启用 HTTPS，用户输入的密码将以明文经过网络链路，任何中间节点都可截获。",
+   "fix": {
+    "frontend": "// 前端无需改动；配合后端强制 HTTPS 后自动生效。",
+    "backend": "// 申请证书（Let's Encrypt 免费）并强制跳转\n// certbot --nginx -d example.com\nserver {\n  listen 80;\n  return 301 https://$host$request_uri;\n}"
+   },
+   "verify": [
+    "浏览器地址栏显示锁标志",
+    "http:// 访问自动跳转 https://"
+   ],
+   "guard": "# 部署流水线加证书到期监控，避免 HTTPS 失效回退\ncertbot renew --dry-run",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -1,4 +1,9 @@\n server {\n     listen 80;\n+    return 301 https://$host$request_uri;\n+}\n+server {\n+    listen 443 ssl;\n     server_name example.com;\n }"
+  },
+  "sec-no-https": {
+   "category": "security",
+   "severity": "medium",
+   "title": "整站未启用 HTTPS",
+   "rootCause": "所有流量明文传输，会话、密码、业务数据可被嗅探与篡改，也不满足现代浏览器对安全上下文的要求（如摄像头、Service Worker）。",
+   "fix": {
+    "frontend": "// 无需改动；启用 HTTPS 后把站内硬编码 http:// 链接改为相对路径。",
+    "backend": "# Let's Encrypt 一键签发并自动续期\ncertbot --nginx -d example.com\n# Nginx 80 端口 301 到 443，并开启 HSTS"
+   },
+   "verify": [
+    "https:// 访问正常且证书有效",
+    "SSL Labs 测试评级 A 以上"
+   ],
+   "guard": "# 监控证书有效期，到期前 30 天告警\necho | openssl s_client -connect example.com:443 2>/dev/null | openssl x509 -noout -enddate",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -1,4 +1,8 @@\n server {\n     listen 80;\n+    return 301 https://$host$request_uri;\n+}\n+server {\n+    listen 443 ssl;\n     server_name example.com;\n }"
+  },
+  "sec-inline-handler": {
+   "category": "security",
+   "severity": "medium",
+   "title": "内联事件处理器（onclick 等）扩大 XSS 攻击面",
+   "rootCause": "内联事件与内联脚本迫使 CSP 放开 unsafe-inline，削弱 XSS 防线；同时 HTML 注入点可直接挂事件执行任意代码。",
+   "fix": {
+    "frontend": "<!-- 改前 -->\n<button onclick=\"doSave()\">保存</button>\n\n<!-- 改后：外部 JS + addEventListener -->\n<button id=\"saveBtn\">保存</button>\n<script src=\"/js/app.js\"></script>\n// app.js\ndocument.getElementById('saveBtn').addEventListener('click', doSave);",
+    "backend": "// CSP 去掉 unsafe-inline，只允许外部脚本\n// Content-Security-Policy: script-src 'self'"
+   },
+   "verify": [
+    "全局搜索 on\\w+= 确认内联事件清零",
+    "开启严格 CSP 后页面功能正常、Console 无拦截"
+   ],
+   "guard": "// ESLint（eslint-plugin-html）禁止内联事件\n// rules: { 'html/no-inline-event-handlers': 'error' }\n// CI 扫描：grep -rE '\\son[a-z]+=' src/ && exit 1",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -10,7 +10,8 @@\n-  <button onclick=\"doSave()\">保存</button>\n+  <button id=\"saveBtn\">保存</button>\n+  <script src=\"/js/app.js\"></script>"
+  },
+  "sec-js-url": {
+   "category": "security",
+   "severity": "medium",
+   "title": "javascript: 伪协议链接",
+   "rootCause": "href=\"javascript:...\" 在用户可控拼接场景下可被注入任意脚本，且绕过多数 CSP 配置，属于历史遗留危险写法。",
+   "fix": {
+    "frontend": "<!-- 改前 -->\n<a href=\"javascript:del(1)\">删除</a>\n<!-- 改后 -->\n<button type=\"button\" data-id=\"1\" class=\"del-btn\">删除</button>\n// app.js：事件委托\ndocument.addEventListener('click', e => {\n  const btn = e.target.closest('.del-btn');\n  if (btn) del(btn.dataset.id);\n});",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "全局搜索 javascript: 确认清零",
+    "删除等交互功能回归正常"
+   ],
+   "guard": "// CSP 默认禁止 javascript: URL；CI 扫描模板\ngrep -rn 'javascript:' src/ && exit 1 || true",
+   "diff": "--- a/public/list.html\n+++ b/public/list.html\n@@ -20,7 +20,7 @@\n-<a href=\"javascript:del(1)\">删除</a>\n+<button type=\"button\" data-id=\"1\" class=\"del-btn\">删除</button>"
+  },
+  "sec-eval-dom": {
+   "category": "security",
+   "severity": "high",
+   "title": "存在 eval / document.write / innerHTML 危险写法",
+   "rootCause": "eval 与 document.write 可执行任意字符串；innerHTML 直接拼接用户输入时形成 DOM 型 XSS。location.hash 等来源未消毒即写入 DOM 是典型注入链。",
+   "fix": {
+    "frontend": "// 改前：DOM XSS\nout.innerHTML = location.hash;\n// 改后：纯文本用 textContent；确需富文本用 DOMPurify\nout.textContent = location.hash.slice(1);\n// 富文本场景\nimport DOMPurify from 'dompurify';\nout.innerHTML = DOMPurify.sanitize(userHtml, { USE_PROFILES: { html: true } });",
+    "backend": "// 服务端渲染同样禁止拼接：模板引擎自动转义\n// EJS 用 <%= %>（转义）而非 <%- %>（原样输出）"
+   },
+   "verify": [
+    "访问 #<img src=x onerror=alert(1)>，确认弹窗不出现",
+    "全局搜索 eval(/document.write(/.innerHTML= 并逐一确认已消毒"
+   ],
+   "guard": "// ESLint 禁止危险 API\n// rules: { 'no-eval': 'error', 'no-implied-eval': 'error' }\n// 封装安全渲染函数，业务禁止直接 innerHTML\nexport function renderText(el, s) { el.textContent = s; }",
+   "diff": "--- a/public/js/app.js\n+++ b/public/js/app.js\n@@ -3,7 +3,8 @@\n const out = document.getElementById('out');\n-out.innerHTML = location.hash;\n+// 纯文本渲染，杜绝 DOM XSS\n+out.textContent = decodeURIComponent(location.hash.slice(1));"
+  },
+  "sec-blank-noopener": {
+   "category": "security",
+   "severity": "low",
+   "title": "target=\"_blank\" 链接缺少 rel=\"noopener\"",
+   "rootCause": "新窗口可通过 window.opener 反向控制原页面（标签劫持），把用户重定向到钓鱼站。",
+   "fix": {
+    "frontend": "<a href=\"https://example.com\" target=\"_blank\" rel=\"noopener noreferrer\">外部链接</a>",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "全局搜索 target=\"_blank\"，确认均带 rel=\"noopener\""
+   ],
+   "guard": "// CI 扫描\ngrep -rE 'target=\"_blank\"' src/ | grep -v noopener && exit 1 || true",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -15,7 +15,7 @@\n-<a href=\"https://example.com\" target=\"_blank\">外部链接</a>\n+<a href=\"https://example.com\" target=\"_blank\" rel=\"noopener noreferrer\">外部链接</a>"
+  },
+  "sec-missing-sri": {
+   "category": "security",
+   "severity": "low",
+   "title": "第三方脚本缺少 SRI（integrity）校验",
+   "rootCause": "CDN 脚本一旦被投毒或劫持，将直接在你的站点执行恶意代码；无 integrity 时浏览器无法发现文件被篡改。",
+   "fix": {
+    "frontend": "<!-- 用 openssl 计算哈希后固定版本 -->\n<script src=\"https://cdn.example.com/lib@1.2.3.js\"\n        integrity=\"sha384-<base64哈希>\"\n        crossorigin=\"anonymous\"></script>\n# 计算：curl -s URL | openssl dgst -sha384 -binary | openssl base64 -A",
+    "backend": "// 无需后端改动；更稳妥的做法是把第三方库下载到自有域名托管。"
+   },
+   "verify": [
+    "篡改 CDN 文件内容后浏览器拒绝执行（Console 报 SRI 错误）"
+   ],
+   "guard": "# 依赖锁定 + 定期审计\nnpm ci --ignore-scripts\nnpm audit --production",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -5,7 +5,9 @@\n-  <script src=\"https://cdn.example.com/lib.js\"></script>\n+  <script src=\"https://cdn.example.com/lib@1.2.3.js\"\n+          integrity=\"sha384-REPLACE_WITH_REAL_HASH\"\n+          crossorigin=\"anonymous\"></script>"
+  },
+  "sec-sensitive-path": {
+   "category": "security",
+   "severity": "critical",
+   "title": "敏感路径可公开访问（.env / .git / 备份文件等）",
+   "rootCause": "部署时把源码目录、备份或配置文件一并发布到 Web 根目录，且未做访问控制；.env 泄露数据库口令，.git 泄露可还原全部源码。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# Nginx：立刻封禁敏感路径\nlocation ~ /\\.(git|env|svn|DS_Store) { deny all; return 404; }\nlocation ~* \\.(sql|zip|bak|log)$ { deny all; return 404; }\n\n# 同时从 Web 根目录物理删除这些文件，并轮换已泄露的密钥/口令"
+   },
+   "verify": [
+    "curl -I https://目标/.env 与 /.git/config 均返回 404/403",
+    "确认 .env 中所有密钥已在对应平台轮换（数据库、API key、JWT 密钥）"
+   ],
+   "guard": "# 部署流水线：发布前扫描产物，禁止敏感文件进入发布包\n# .gitignore + CI 检查\ntest ! -f dist/.env || exit 1\n# 用 gitleaks 扫描仓库历史中的密钥\ngitleaks detect --source .",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -12,6 +12,9 @@ server {\n     location / {\n         proxy_pass http://127.0.0.1:3000;\n     }\n+    location ~ /\\.(git|env|svn|DS_Store) { deny all; return 404; }\n+    location ~* \\.(sql|zip|bak|log)$ { deny all; return 404; }\n }"
+  },
+  "ui-missing-viewport": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "缺少 viewport 元标签（移动端布局错乱）",
+   "rootCause": "没有 <meta name=\"viewport\"> 时，手机浏览器按 980px 桌面宽度渲染再缩小，导致文字过小、按钮难点、横向滚动条。",
+   "fix": {
+    "frontend": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "手机或 DevTools 设备模拟（iPhone/Android）打开页面，确认无横向滚动、文字大小正常",
+    "Lighthouse 移动端审计不再报 viewport 缺失"
+   ],
+   "guard": "// 模板基类统一注入，CI 用 html-validate 检查\n// .htmlvalidate.json: { \"rules\": { \"meta-refresh\": \"off\" } }\n// 自定义脚本：所有 HTML 模板必须包含 viewport",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -2,6 +2,7 @@\n <head>\n   <meta charset=\"utf-8\">\n+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n   <title>页面</title>"
+  },
+  "ui-missing-lang": {
+   "category": "ui",
+   "severity": "low",
+   "title": "<html> 缺少 lang 属性",
+   "rootCause": "屏幕阅读器无法选择正确发音，浏览器翻译与字体回退策略失效，影响无障碍与国际化体验。",
+   "fix": {
+    "frontend": "<html lang=\"zh-CN\">",
+    "backend": "// 服务端模板按用户语言动态输出 lang。"
+   },
+   "verify": [
+    "Lighthouse / axe 无障碍审计通过",
+    "屏幕阅读器朗读发音正确"
+   ],
+   "guard": "// html-validate 规则\n// { \"rules\": { \"html-lang\": \"error\" } }",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -1,5 +1,5 @@\n <!doctype html>\n-<html>\n+<html lang=\"zh-CN\">\n <head>"
+  },
+  "ui-img-no-alt": {
+   "category": "ui",
+   "severity": "low",
+   "title": "图片缺少 alt 文本",
+   "rootCause": "图片加载失败时用户看不到任何说明；屏幕阅读器无法描述内容；SEO 受损。",
+   "fix": {
+    "frontend": "<img src=\"/logo.png\" alt=\"公司 Logo\">\n<!-- 纯装饰图用空 alt，避免读屏噪音 -->\n<img src=\"/divider.png\" alt=\"\">",
+    "backend": "// CMS 上传图片时把「替代文本」设为必填字段。"
+   },
+   "verify": [
+    "断网/拦截图片后页面仍可读",
+    "axe 审计 image-alt 规则通过"
+   ],
+   "guard": "// eslint-plugin-jsx-a11y\n// rules: { 'jsx-a11y/alt-text': 'error' }",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -9,7 +9,7 @@\n-  <img src=\"/logo.png\">\n+  <img src=\"/logo.png\" alt=\"公司 Logo\">"
+  },
+  "ui-duplicate-id": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "DOM 中存在重复 id",
+   "rootCause": "getElementById 只返回第一个匹配，label[for] 关联错乱，锚点跳转与自动化测试定位失效——既是 UI BUG 也是功能 BUG 的常见根源。",
+   "fix": {
+    "frontend": "<!-- 每个 id 全局唯一；组件化场景用 useId 生成 -->\n<h1 id=\"page-title\">标题</h1>\n<p id=\"page-desc\">描述</p>\n// React: const id = useId();",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "Console 执行：new Set([...document.querySelectorAll(\"[id]\")].map(e=>e.id)).size === document.querySelectorAll(\"[id]\").length 应为 true",
+    "点击 label 能正确聚焦对应输入框"
+   ],
+   "guard": "// CI 用 html-validate 的 no-dup-id 规则\n// { \"rules\": { \"no-dup-id\": \"error\" } }\n// 组件库封装 useUniqueId，禁止手写固定 id",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -8,8 +8,8 @@\n-  <h1 id=\"main\">标题</h1>\n-  <p id=\"main\">描述</p>\n+  <h1 id=\"page-title\">标题</h1>\n+  <p id=\"page-desc\">描述</p>"
+  },
+  "ui-input-no-label": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "表单输入缺少 label / aria-label 关联",
+   "rootCause": "点击文字无法聚焦输入框（可用性差），屏幕阅读器读不出字段用途，自动化测试难以定位——普通用户最常见的「表单点不动」类投诉来源。",
+   "fix": {
+    "frontend": "<label for=\"q\">搜索关键词</label>\n<input id=\"q\" name=\"q\" type=\"text\">\n<!-- 无法加可见 label 时至少给 aria-label -->\n<input type=\"search\" aria-label=\"站内搜索\">",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "点击 label 文字能聚焦输入框",
+    "axe 审计 label 规则通过",
+    "Tab 键顺序符合预期"
+   ],
+   "guard": "// eslint-plugin-jsx-a11y\n// rules: { 'jsx-a11y/label-has-associated-control': 'error' }",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -11,7 +11,8 @@\n-    <input type=\"text\" name=\"q\" placeholder=\"搜索\">\n+    <label for=\"q\">搜索关键词</label>\n+    <input id=\"q\" type=\"text\" name=\"q\" placeholder=\"搜索\">"
+  },
+  "ui-small-tap-target": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "可点击目标过小（< 40×40px）",
+   "rootCause": "按钮/链接点击区域小于 40×40px，移动端手指难以点中，误触率高；WCAG 2.5.8 要求目标至少 24×24px，推荐 44×44px。",
+   "fix": {
+    "frontend": "/* 改后：保证最小点击区域，视觉大小可不变 */\n.btn, a.action {\n  min-width: 44px;\n  min-height: 44px;\n  display: inline-flex;\n  align-items: center;\n  justify-content: center;\n}\n/* 图标按钮用 padding 撑大点击区 */\n.icon-btn { padding: 12px; }",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "DevTools 测量按钮包围盒 ≥ 40×40px",
+    "真机拇指操作可一次点中",
+    "axe 审计 target-size 规则通过"
+   ],
+   "guard": "// CI 视觉回归：Playwright 断言关键按钮包围盒\nconst box = await page.getByRole('button', { name: '提交' }).boundingBox();\nexpect(box.width).toBeGreaterThanOrEqual(40);\nexpect(box.height).toBeGreaterThanOrEqual(40);",
+   "diff": "--- a/public/style.css\n+++ b/public/style.css\n@@ -20,6 +20,9 @@\n .btn {\n+  min-width: 44px;\n+  min-height: 44px;\n   padding: 4px 8px;\n }"
+  },
+  "ui-low-contrast": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "文本对比度不足（看不清）",
+   "rootCause": "前景色与背景色对比度低于 WCAG AA 要求（正文 4.5:1、大字号 3:1），弱视用户与强光环境下无法阅读，是最常见的「字看不清」投诉。",
+   "fix": {
+    "frontend": "/* 改后：正文对比度 ≥ 4.5:1 */\n:root { --text: #1f2937; --text-muted: #4b5563; } /* 白底下均达标 */\nbody { color: var(--text); }\n.hint { color: var(--text-muted); } /* 不要用 #9ca3af 以下的浅灰 */",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "Chrome DevTools 颜色选择器显示对比度 ≥ 4.5:1",
+    "axe 审计 color-contrast 规则通过",
+    "灰度模式下文字仍清晰"
+   ],
+   "guard": "// CI 用 axe-core 自动审计\nconst results = await new AxeBuilder({ page }).withRules(['color-contrast']).analyze();\nexpect(results.violations).toHaveLength(0);",
+   "diff": "--- a/public/style.css\n+++ b/public/style.css\n@@ -8,7 +8,7 @@\n-.hint { color: #b0b0b0; }\n+.hint { color: #4b5563; }"
+  },
+  "ui-empty-clickable": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "可点击元素无文本/无标签（空按钮）",
+   "rootCause": "按钮或链接没有可见文字、aria-label、title 或图标替代文本：用户不知道点了会发生什么，屏幕阅读器读作「按钮」，自动化测试无法定位。",
+   "fix": {
+    "frontend": "<!-- 改后：图标按钮必须带可访问名称 -->\n<button aria-label=\"关闭弹窗\"><svg aria-hidden=\"true\">…</svg></button>\n<a href=\"/cart\" aria-label=\"购物车\"><img src=\"/cart.svg\" alt=\"购物车\"></a>",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "屏幕阅读器能读出按钮用途",
+    "axe 审计 button-name / link-name 规则通过",
+    "悬停有 title 提示"
+   ],
+   "guard": "// eslint-plugin-jsx-a11y\n// rules: { 'jsx-a11y/control-has-associated-label': 'error' }",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -15,7 +15,7 @@\n-  <button class=\"icon-close\"><svg>…</svg></button>\n+  <button class=\"icon-close\" aria-label=\"关闭弹窗\"><svg aria-hidden=\"true\">…</svg></button>"
+  },
+  "func-http-error": {
+   "category": "function",
+   "severity": "high",
+   "title": "页面返回 4xx/5xx 错误",
+   "rootCause": "资源不存在、路由配置错误、后端异常或权限拦截都可能导致错误状态码；用户看到白屏或报错页。",
+   "fix": {
+    "frontend": "// 全局兜底：友好错误页 + 重试\nif (!res.ok) {\n  showError(res.status === 404 ? '页面不存在' : '服务暂时不可用，请稍后重试');\n}",
+    "backend": "// Express：统一错误处理，避免把堆栈抛给用户\napp.use((err, req, res, next) => {\n  logger.error(err);\n  res.status(err.status || 500).json({ error: '服务异常，请稍后重试' });\n});"
+   },
+   "verify": [
+    "curl -I 目标地址 返回 200",
+    "错误场景展示友好提示而非堆栈"
+   ],
+   "guard": "// 健康检查 + 告警\n// uptime-kuma 监控关键 URL，5xx 比例 > 1% 触发告警",
+   "diff": "--- a/src/app.js\n+++ b/src/app.js\n@@ -30,3 +30,9 @@ app.get('/', handler);\n+app.use((err, req, res, next) => {\n+  logger.error(err);\n+  res.status(err.status || 500).json({ error: '服务异常，请稍后重试' });\n+});"
+  },
+  "sec-csp-unsafe": {
+   "category": "security",
+   "severity": "medium",
+   "title": "CSP 配置过宽（unsafe-inline / unsafe-eval / 通配源）",
+   "rootCause": "CSP 虽存在但放开 unsafe-inline/unsafe-eval 或 * 源，XSS 防线形同虚设。",
+   "fix": {
+    "frontend": "// 内联脚本/事件迁移到外部文件；确需内联用 nonce/hash。",
+    "backend": "// 收紧 CSP：去掉 unsafe-inline/unsafe-eval，源用白名单\n// Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-<随机>'"
+   },
+   "verify": [
+    "curl -I 确认 CSP 无 unsafe-* 与通配",
+    "业务功能回归正常"
+   ],
+   "guard": "# CI 响应头基线断言\ncurl -sI https://staging.example.com | grep -Ei \"unsafe-inline|unsafe-eval\" && exit 1 || true",
+   "diff": "--- a/nginx.conf\n+++ b/nginx.conf\n@@ -10,7 +10,7 @@\n-    add_header Content-Security-Policy \"default-src *; script-src 'self' 'unsafe-inline' 'unsafe-eval'\" always;\n+    add_header Content-Security-Policy \"default-src 'self'; script-src 'self'\" always;"
+  },
+  "sec-autocomplete-sensitive": {
+   "category": "security",
+   "severity": "low",
+   "title": "密码/敏感输入未设置 autocomplete 策略",
+   "rootCause": "共用设备上浏览器自动填充/保存密码，敏感凭据易被他人获取。",
+   "fix": {
+    "frontend": "<input type=\"password\" name=\"pwd\" autocomplete=\"current-password\">\n<!-- 一次性验证码用 autocomplete=\"one-time-code\"；敏感非凭据字段 off -->",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "检查密码框 autocomplete 属性符合语义",
+    "浏览器密码管理行为符合预期"
+   ],
+   "guard": "// html-validate / 自定义 CI 扫描：password 输入必须带 autocomplete",
+   "diff": "--- a/public/login.html\n+++ b/public/login.html\n@@ -9,7 +9,7 @@\n-    <input type=\"password\" name=\"pwd\">\n+    <input type=\"password\" name=\"pwd\" autocomplete=\"current-password\">"
+  },
+  "sec-csrf-form": {
+   "category": "security",
+   "severity": "medium",
+   "title": "POST 表单缺少 CSRF token 隐藏字段",
+   "rootCause": "状态变更表单无 token，第三方页面可伪造提交（改密/转账/发帖）。",
+   "fix": {
+    "frontend": "<form method=\"POST\" action=\"/api/profile\">\n  <input type=\"hidden\" name=\"_csrf\" value=\"<服务端下发的token>\">",
+    "backend": "// 服务端校验 token（csurf 或自研同步 token）\napp.use(csrf());\napp.post('/api/profile', (req, res) => { /* req.csrfToken() 校验 */ });"
+   },
+   "verify": [
+    "去掉 token 提交返回 403",
+    "正常表单提交成功"
+   ],
+   "guard": "// 模板基类自动注入 _csrf；CI 扫描 POST 表单必须含 token 字段",
+   "diff": "--- a/views/profile.ejs\n+++ b/views/profile.ejs\n@@ -2,6 +2,7 @@\n <form method=\"POST\" action=\"/api/profile\">\n+  <input type=\"hidden\" name=\"_csrf\" value=\"<%= csrfToken %>\">"
+  },
+  "perf-cls-img": {
+   "category": "performance",
+   "severity": "low",
+   "title": "图片未声明宽高（布局偏移 CLS）",
+   "rootCause": "img 无 width/height 或 aspect-ratio，加载完成时撑开布局造成页面跳动与误触。",
+   "fix": {
+    "frontend": "<img src=\"/banner.png\" width=\"1200\" height=\"400\" alt=\"活动横幅\">\n/* 或 CSS: img { aspect-ratio: 3 / 1; } */",
+    "backend": "// CMS 输出图片时附带尺寸元数据。"
+   },
+   "verify": [
+    "Lighthouse CLS < 0.1",
+    "加载过程无跳动"
+   ],
+   "guard": "// eslint-plugin-jsx-a11y / CI：img 必须带宽高或 aspect-ratio",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -9,7 +9,7 @@\n-  <img src=\"/banner.png\">\n+  <img src=\"/banner.png\" width=\"1200\" height=\"400\" alt=\"活动横幅\">"
+  },
+  "perf-render-blocking": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "head 中同步脚本阻塞首屏渲染",
+   "rootCause": "head 里无 defer/async 的外部脚本阻塞 HTML 解析，首屏白屏时间随脚本体积线性增长。",
+   "fix": {
+    "frontend": "<script src=\"/js/app.js\" defer></script>\n<!-- 统计等第三方用 async；关键首屏逻辑才保留同步 -->",
+    "backend": "// 无需后端改动。"
+   },
+   "verify": [
+    "Performance 面板首屏无阻塞长条",
+    "功能在 DOMContentLoaded 后正常"
+   ],
+   "guard": "// CI 扫描 head 内 script 必须带 defer/async/module",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -4,7 +4,7 @@\n-  <script src=\"/js/app.js\"></script>\n+  <script src=\"/js/app.js\" defer></script>"
+  },
+  "sec-secret-js-inline": {
+   "category": "security",
+   "severity": "high",
+   "title": "页面/内联 JS 硬编码密钥或凭据",
+   "rootCause": "把 API key/secret/token/密码或云访问键写进 HTML/内联脚本，随页面公开，任何人 view-source 即可抓取。",
+   "fix": {
+    "frontend": "// 密钥绝不进前端；改为后端代理调用\n// 删除 window.API_KEY / const secret = \"...\" 等",
+    "backend": "// 密钥放服务端环境变量，前端经后端代理访问第三方\nconst key = process.env.THIRD_PARTY_KEY;\napp.get('/api/proxy', auth, async (req, res) => res.json(await thirdParty(key, req.query)));"
+   },
+   "verify": [
+    "view-source 与全部 chunk 无密钥/凭据",
+    "已泄露密钥在对应平台轮换"
+   ],
+   "guard": "// CI 秘密扫描（gitleaks）+ 构建环境变量白名单（仅 PUBLIC_ 进包）",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -10,7 +10,6 @@\n-  <script>window.API_KEY = \"sk-live-xxxx\";</script>\n+  <!-- 密钥移至服务端，前端经 /api/proxy 调用 -->"
+  },
+  "sec-sql-error-disclosure": {
+   "category": "security",
+   "severity": "medium",
+   "title": "页面泄露 SQL/数据库报错（报错注入线索）",
+   "rootCause": "响应直接输出 SQL 语法错误/驱动堆栈，既泄露表结构又为报错注入（extractvalue/updatexml）提供回显通道。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 生产统一脱敏错误页，详细报错只进日志\napp.use((err, req, res, next) => {\n  logger.error(err);\n  res.status(500).json({ error: 'internal' });\n});"
+   },
+   "verify": [
+    "触发错误返回统一脱敏页",
+    "响应无 SQL/堆栈/表名"
+   ],
+   "guard": "// CI 断言错误响应不含 SQL 关键字；生产 error handler 审计"
+  },
+  "sec-price-hidden-field": {
+   "category": "security",
+   "severity": "high",
+   "title": "价格/金额放在隐藏域或前端可改字段",
+   "rootCause": "把 price/amount/total 放 hidden 域或前端计算后提交，服务端若信任即可改价低价下单（资损）。",
+   "fix": {
+    "frontend": "<!-- hidden 仅传 flowId/CSRF，不传价格 -->\n<input type=\"hidden\" name=\"flowId\" value=\"...\">",
+    "backend": "// 实付服务端按商品+券+运费重算，不读客户端金额\nconst expect = pricing.compute(items, coupon, addr);\nif (Math.abs(expect - req.body.total) > 0.001) return res.status(400).end();"
+   },
+   "verify": [
+    "改 hidden/total 被拒或按服务端价成交",
+    "订单实付与定价一致"
+   ],
+   "guard": "// CI 价格篡改用例；定价单一服务端来源"
+  },
+  "sec-idor-sequential": {
+   "category": "security",
+   "severity": "medium",
+   "title": "顺序数字 ID 暴露（IDOR 可遍历线索）",
+   "rootCause": "资源用自增数字 id 且接口未校验归属，攻击者递增/递减 id 即可遍历他人订单/用户/文件。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 对外用不可猜 UUID/雪花 ID + 归属校验\nconst row = await db.order.findUnique({ where: { id } });\nif (!row || row.userId !== req.user.id) return res.sendStatus(404);"
+   },
+   "verify": [
+    "遍历相邻 id 返回 404/403",
+    "对外 ID 不可枚举"
+   ],
+   "guard": "// CI 双账号越权遍历用例；新表默认 UUID 主键"
+  },
+  "sec-password-in-url": {
+   "category": "security",
+   "severity": "high",
+   "title": "密码/token 出现在 URL（日志/Referer 泄露）",
+   "rootCause": "把 pwd/password/token 放 query 或 GET 表单，会进浏览器历史、服务器日志、Referer 头造成凭据外泄。",
+   "fix": {
+    "frontend": "<form method=\"post\" action=\"/login\"><!-- 凭据走 body，不走 URL --></form>",
+    "backend": "// 拒绝 GET 传凭据；日志脱敏 query\napp.post('/login', handler);\nlogger.info(req.path); // 不记录含凭据的 query"
+   },
+   "verify": [
+    "登录/改密仅 POST body",
+    "日志/Referer 无凭据"
+   ],
+   "guard": "// CI 扫描 URL/表单含 pwd/token 参数；日志脱敏中间件"
+  },
+  "sec-graphql-introspection": {
+   "category": "security",
+   "severity": "medium",
+   "title": "GraphQL 内省公开（全 schema 暴露）",
+   "rootCause": "生产开启 introspection，__schema 查询返回全部类型/字段/接口，便于定向挖掘越权与注入。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 生产关闭内省 + 深度/成本限制\nconst server = new ApolloServer({ introspection: false,\n  plugins: [depthLimit(5), costLimit({ maxCost: 1000 })] });"
+   },
+   "verify": [
+    "生产 __schema 查询被拒",
+    "超深/超贵查询被限"
+   ],
+   "guard": "// CI 探测 introspection；GraphQL 深度/成本用例"
+  }
+ },
+ "manual": {
+  "logic-idor": {
+   "category": "logic",
+   "severity": "high",
+   "title": "水平越权（IDOR）：可访问他人数据",
+   "rootCause": "接口只校验「已登录」，未校验「资源属于当前用户」；攻击者遍历 id 即可读取/修改他人订单、地址、文件。",
+   "fix": {
+    "frontend": "// 前端隐藏按钮只是体验优化，绝不能作为权限边界。",
+    "backend": "// 每个资源接口都校验归属\napp.get('/api/orders/:id', auth, async (req, res) => {\n  const order = await db.orders.findById(req.params.id);\n  if (!order || order.userId !== req.user.id) return res.sendStatus(404);\n  res.json(order);\n});"
+   },
+   "verify": [
+    "用 A 账号 token 请求 B 账号的资源 id，必须返回 404/403",
+    "自动化越权用例：双账号交叉访问矩阵全部拒绝"
+   ],
+   "guard": "// 统一归属校验中间件，新接口默认拒绝\nexport function owned(model) {\n  return async (req, res, next) => {\n    const row = await model.findById(req.params.id);\n    if (!row || row.userId !== req.user.id) return res.sendStatus(404);\n    req.resource = row; next();\n  };\n}",
+   "diff": "--- a/src/routes/orders.js\n+++ b/src/routes/orders.js\n@@ -4,7 +4,10 @@\n-router.get('/orders/:id', auth, async (req, res) => {\n-  const order = await db.orders.findById(req.params.id);\n+router.get('/orders/:id', auth, owned(db.orders), async (req, res) => {\n+  const order = req.resource;\n   res.json(order);\n });"
+  },
+  "logic-client-validation": {
+   "category": "logic",
+   "severity": "high",
+   "title": "仅前端校验，后端可被绕过",
+   "rootCause": "校验逻辑只写在浏览器里；攻击者直接调 API 或用 curl 提交非法数据（负数金额、超长字段、跳过必填），造成脏数据或资损。",
+   "fix": {
+    "frontend": "// 前端校验保留（体验），但不再作为唯一防线。",
+    "backend": "// 后端用 schema 校验，前后端共用同一份规则\nimport { z } from 'zod';\nconst OrderSchema = z.object({\n  amountCents: z.number().int().positive().max(100_000_00),\n  qty: z.number().int().min(1).max(99),\n});\napp.post('/api/orders', (req, res) => {\n  const parsed = OrderSchema.safeParse(req.body);\n  if (!parsed.success) return res.status(400).json(parsed.error.issues);\n  // ...\n});"
+   },
+   "verify": [
+    "绕过前端直接 curl 提交非法值，确认返回 400",
+    "前后端校验规则一致性用例通过"
+   ],
+   "guard": "// 校验规则单一来源：shared/schemas.js 同时被前端表单与后端路由引用\n// CI 契约测试：对每个写接口发送边界值/非法值矩阵",
+   "diff": "--- a/src/routes/orders.js\n+++ b/src/routes/orders.js\n@@ -1,6 +1,11 @@\n+import { OrderSchema } from '../../shared/schemas.js';\n router.post('/orders', async (req, res) => {\n+  const parsed = OrderSchema.safeParse(req.body);\n+  if (!parsed.success) return res.status(400).json(parsed.error.issues);\n   const order = await createOrder(req.body);\n   res.json(order);\n });"
+  },
+  "logic-race": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "竞态条件：重复提交 / 超卖 / 重复扣款",
+   "rootCause": "「先查后改」不是原子操作，并发请求同时通过检查；按钮无防抖导致双击重复下单。",
+   "fix": {
+    "frontend": "// 提交后立即禁用按钮 + 请求去重\nbtn.disabled = true;\ntry { await submitOrder(payload); } finally { btn.disabled = false; }",
+    "backend": "// 数据库层原子扣减 + 唯一约束兜底\nconst r = await db.query(\n  'UPDATE stock SET qty = qty - $1 WHERE sku = $2 AND qty >= $1',\n  [n, sku]\n);\nif (r.rowCount === 0) throw new Error('库存不足');\n// 幂等：客户端生成 Idempotency-Key，服务端唯一索引去重"
+   },
+   "verify": [
+    "并发 50 个请求抢购库存 10 的商品，最终恰好成功 10 单",
+    "同一 Idempotency-Key 重放 10 次只产生 1 条订单"
+   ],
+   "guard": "// 压测脚本进 CI：k6 并发场景断言总量守恒\n// 数据库约束：UNIQUE(idempotency_key)、CHECK(qty >= 0)",
+   "diff": "--- a/src/services/order.js\n+++ b/src/services/order.js\n@@ -10,8 +10,12 @@ export async function placeOrder(userId, sku, n, key) {\n-  const stock = await getStock(sku);\n-  if (stock < n) throw new Error('库存不足');\n-  await setStock(sku, stock - n);\n+  const dup = await db.orders.findByIdempotencyKey(key);\n+  if (dup) return dup;\n+  const r = await db.query(\n+    'UPDATE stock SET qty = qty - $1 WHERE sku = $2 AND qty >= $1', [n, sku]);\n+  if (r.rowCount === 0) throw new Error('库存不足');\n   return createOrder(userId, sku, n, key);\n }"
+  },
+  "data-float-money": {
+   "category": "data",
+   "severity": "high",
+   "title": "浮点数计算金额（0.1 + 0.2 ≠ 0.3）",
+   "rootCause": "IEEE754 浮点误差在金额累加、折扣、分摊中被放大，出现对账不平、多扣/少扣一分钱等资损问题。",
+   "fix": {
+    "frontend": "// 展示层只做格式化，不参与计算\nnew Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' })\n  .format(cents / 100);",
+    "backend": "// 方案一：金额一律用「分」（整数）存储与计算\nconst totalCents = items.reduce((s, i) => s + i.priceCents * i.qty, 0);\n// 方案二：必须小数时用 decimal.js\nimport Decimal from 'decimal.js';\nconst total = new Decimal('0.1').plus('0.2').toString(); // '0.3'"
+   },
+   "verify": [
+    "单元测试：0.1 + 0.2 精确等于 0.3",
+    "对账脚本：sum(订单明细) === 订单总额，跑全量历史数据"
+   ],
+   "guard": "// ESLint 禁止金额字段出现浮点运算；数据库金额列用 BIGINT(分) 或 DECIMAL(18,2)\n// CI 对账任务每日跑，不平即告警",
+   "diff": "--- a/src/money.js\n+++ b/src/money.js\n@@ -1,5 +1,6 @@\n-export function total(items) {\n-  return items.reduce((s, i) => s + i.price * i.qty, 0);\n-}\n+// 金额以「分」为单位，整数运算杜绝浮点误差\n+export function totalCents(items) {\n+  return items.reduce((s, i) => s + i.priceCents * i.qty, 0);\n+}"
+  },
+  "data-timezone": {
+   "category": "data",
+   "severity": "medium",
+   "title": "时区混乱：跨时区用户看到错误时间 / 日报统计错位",
+   "rootCause": "服务器、数据库、前端各自用本地时区解析时间字符串；夏令时切换导致重复或丢失一小时数据。",
+   "fix": {
+    "frontend": "// 传输一律 ISO8601 UTC，展示时转用户时区\nnew Date(isoUtc).toLocaleString('zh-CN', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });",
+    "backend": "// 存储统一 UTC；统计口径显式指定业务时区\n// PostgreSQL: timestamptz；MySQL: 连接串 timezone=Z\nconst dayStart = DateTime.utc().setZone('Asia/Shanghai').startOf('day').toUTC();"
+   },
+   "verify": [
+    "把系统时区改为 America/New_York 后下单，数据库仍存 UTC",
+    "日报边界用例：23:59 与 00:01 的订单归属正确日期"
+   ],
+   "guard": "// CI 用例覆盖 DST 切换日；禁止 new Date('2026-01-01 00:00') 这类无时区解析\n// eslint: no-restricted-syntax 拦截裸 Date 字符串构造",
+   "diff": "--- a/src/report.js\n+++ b/src/report.js\n@@ -3,7 +3,8 @@\n-const start = new Date(dateStr + ' 00:00:00');\n+// 显式业务时区 → UTC，避免服务器本地时区漂移\n+const start = DateTime.fromISO(dateStr, { zone: 'Asia/Shanghai' })\n+  .startOf('day').toUTC().toJSDate();"
+  },
+  "function-null-crash": {
+   "category": "function",
+   "severity": "medium",
+   "title": "空值 / undefined 导致页面崩溃或白屏",
+   "rootCause": "接口字段缺失、数组为空、异步未返回时直接 .map/.length 访问，抛出 TypeError 中断渲染。",
+   "fix": {
+    "frontend": "// 可选链 + 默认值 + 渲染兜底\nconst list = data?.items ?? [];\nif (!list.length) return <Empty text=\"暂无数据\" />;\n// React 加 ErrorBoundary，单组件崩溃不拖垮整页",
+    "backend": "// 接口契约保证字段恒存在（null 也要显式返回）\nres.json({ items: rows ?? [], total: rows?.length ?? 0 });"
+   },
+   "verify": [
+    "Mock 接口返回 {} / null / []，页面均不崩溃",
+    "断网场景展示友好降级而非白屏"
+   ],
+   "guard": "// TypeScript strictNullChecks + CI 空值用例矩阵\n// 接口层 zod schema 兜底默认值",
+   "diff": "--- a/src/components/List.jsx\n+++ b/src/components/List.jsx\n@@ -2,7 +2,8 @@\n export function List({ data }) {\n-  return data.items.map(i => <Row key={i.id} {...i} />);\n+  const items = data?.items ?? [];\n+  if (!items.length) return <Empty text=\"暂无数据\" />;\n+  return items.map(i => <Row key={i.id} {...i} />);\n }"
+  },
+  "algorithm-off-by-one": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "边界差一错误（分页 / 区间 / 循环）",
+   "rootCause": "< 与 <= 混用、分页 offset 从 0 还是 1 开始不一致，导致最后一页丢数据、区间统计少一天、数组越界。",
+   "fix": {
+    "frontend": "// 分页统一 0 基 offset，展示层再 +1\nconst offset = page * pageSize; // page 从 0 开始",
+    "backend": "// 区间统一「左闭右开」，杜绝两端重复/遗漏\n// WHERE created_at >= $start AND created_at < $end\nconst totalPages = Math.ceil(total / pageSize); // 不是 floor"
+   },
+   "verify": [
+    "属性测试：任意 total/pageSize 下，各页数据拼接 === 全量且无重复",
+    "边界用例：total=0、total=pageSize、total=pageSize+1"
+   ],
+   "guard": "// fast-check 属性测试进 CI\nfc.assert(fc.property(fc.nat(), fc.integer({min:1,max:100}), (total, size) => {\n  const pages = Math.ceil(total / size);\n  return sum(pageLengths(total, size, pages)) === total;\n}));",
+   "diff": "--- a/src/paginate.js\n+++ b/src/paginate.js\n@@ -1,5 +1,6 @@\n export function paginate(total, pageSize, page) {\n-  const totalPages = Math.floor(total / pageSize);\n+  // 向上取整，最后一页不足 pageSize 也要保留\n+  const totalPages = Math.ceil(total / pageSize);\n   const offset = page * pageSize;\n   return { totalPages, offset };\n }"
+  },
+  "algorithm-sort-comparator": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "排序比较器错误导致数据乱序 / 不稳定",
+   "rootCause": "comparator 返回布尔值而非数字、多关键字排序未固定次级键、依赖引擎不稳定排序，导致列表顺序随刷新变化、并列名次抖动。",
+   "fix": {
+    "frontend": "// 返回数字；多关键字显式 tie-breaker，保证全序\nrows.sort((a, b) =>\n  b.score - a.score || a.createdAt - b.createdAt || a.id - b.id\n);",
+    "backend": "-- SQL 排序必须带唯一 tie-breaker，保证分页稳定\nSELECT * FROM t ORDER BY score DESC, id ASC LIMIT 20 OFFSET 40;"
+   },
+   "verify": [
+    "相同输入重复排序 100 次结果完全一致",
+    "并列分数场景下顺序由 id 决定，不再抖动"
+   ],
+   "guard": "// 单元测试：shuffle 后排序结果恒等；ESLint 禁止 comparator 返回布尔\n// rules: { 'array-callback-return': 'error' }",
+   "diff": "--- a/src/rank.js\n+++ b/src/rank.js\n@@ -1,4 +1,5 @@\n-export const rank = rows => rows.sort((a, b) => a.score > b.score);\n+// 数字比较 + 唯一 tie-breaker，保证稳定全序\n+export const rank = rows => [...rows].sort(\n+  (a, b) => b.score - a.score || a.id - b.id\n+);"
+  },
+  "ui-state-desync": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "界面状态与数据不同步（改了不刷新 / 缓存脏读）",
+   "rootCause": "多处副本各自维护状态、mutation 后未失效缓存、乐观更新失败未回滚，用户看到旧数据或「保存成功但没变」。",
+   "fix": {
+    "frontend": "// 单一数据源：服务端状态交给查询库统一管理\nconst { data } = useQuery({ queryKey: ['orders'], queryFn: fetchOrders });\n// mutation 成功后精确失效\nonSuccess: () => queryClient.invalidateQueries({ queryKey: ['orders'] });",
+    "backend": "// 写接口返回最新实体 + 版本号，前端据此覆盖本地副本\nres.json({ ...order, version: order.version + 1 });"
+   },
+   "verify": [
+    "修改→立即返回列表，确认展示新值",
+    "断网时乐观更新回滚并提示失败"
+   ],
+   "guard": "// 禁止组件内私存服务端数据副本；ESLint 检查 useState 存接口数据\n// E2E：修改后 1s 内 UI 必须反映新值",
+   "diff": "--- a/src/pages/Orders.jsx\n+++ b/src/pages/Orders.jsx\n@@ -5,8 +5,9 @@\n-const [orders, setOrders] = useState([]);\n-useEffect(() => { fetchOrders().then(setOrders); }, []);\n+// 单一数据源 + 自动失效，杜绝脏副本\n+const { data: orders = [] } = useQuery({\n+  queryKey: ['orders'], queryFn: fetchOrders,\n+});"
+  },
+  "sec-xss-stored": {
+   "category": "security",
+   "severity": "critical",
+   "title": "存储型 XSS：用户内容未消毒即渲染",
+   "rootCause": "评论/昵称等用户输入原样存库并原样输出到 HTML，攻击者植入脚本后所有访问者中招（会话窃取、挂马）。",
+   "fix": {
+    "frontend": "// 输出侧：纯文本 textContent；富文本 DOMPurify 白名单消毒\nimport DOMPurify from 'dompurify';\nel.innerHTML = DOMPurify.sanitize(comment.html, {\n  ALLOWED_TAGS: ['b', 'i', 'a', 'p', 'br'],\n  ALLOWED_ATTR: ['href'],\n});",
+    "backend": "// 输入侧也消毒（纵深防御），模板引擎默认转义\nimport createDOMPurify from 'isomorphic-dompurify';\nconst clean = createDOMPurify.sanitize(dirty);\n// EJS 用 <%= %>，禁止 <%- %> 输出用户内容"
+   },
+   "verify": [
+    "提交 <img src=x onerror=alert(1)> 作为评论，任何页面访问都不弹窗",
+    "用其他账号查看该评论，确认脚本未执行（存储型关键验证）"
+   ],
+   "guard": "// CSP script-src 'self' 兜底；CI 注入用例库（OWASP XSS cheat sheet）\n// 代码评审清单：一切用户内容输出点必须经过转义/消毒",
+   "diff": "--- a/src/views/comment.ejs\n+++ b/src/views/comment.ejs\n@@ -3,7 +3,7 @@\n-  <div class=\"comment\"><%- comment.html %></div>\n+  <div class=\"comment\"><%= comment.text %></div>"
+  }
+ },
+ "captureRules": {
+  "func-console-error": {
+   "category": "function",
+   "severity": "medium",
+   "title": "浏览器控制台报错（console.error）",
+   "rootCause": "页面脚本主动输出错误日志，通常对应接口失败、数据异常或未处理的业务分支；用户可能看到功能失效或空白区域。",
+   "fix": {
+    "frontend": "// 按报错堆栈定位输出点，常见三类：\n// 1) 接口失败未兜底 → 加 catch 与降级 UI\nfetch(url).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })\n  .catch(err => { showToast('加载失败，请重试'); report(err); });\n// 2) 数据为空未判空 → 可选链 + 默认值\n// 3) 第三方 SDK 报错 → 检查版本与初始化时机",
+    "backend": "// 若报错源于接口 5xx：按 traceId 查服务端日志定位异常栈\n// 统一错误响应结构，避免前端拿到 HTML 错误页当 JSON 解析\nres.status(500).json({ code: 'INTERNAL', message: '服务异常', traceId });"
+   },
+   "verify": [
+    "复现操作路径，Console 不再出现该 error",
+    "断网/慢网场景有友好降级而非报错"
+   ],
+   "guard": "// 全局错误上报（Sentry 或自建），线上报错可追溯\nwindow.addEventListener('error', e => report({ msg: e.message, stack: e.error?.stack }));\nwindow.addEventListener('unhandledrejection', e => report({ msg: String(e.reason) }));",
+   "diff": "--- a/src/api.js\n+++ b/src/api.js\n@@ -1,6 +1,10 @@\n export async function getJSON(url) {\n-  const r = await fetch(url);\n-  return r.json();\n+  const r = await fetch(url);\n+  if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);\n+  return r.json();\n }"
+  },
+  "func-js-exception": {
+   "category": "function",
+   "severity": "high",
+   "title": "未捕获的 JS 异常（页面功能中断）",
+   "rootCause": "运行时抛出未捕获异常（TypeError/ReferenceError 等），后续脚本停止执行，表现为按钮无响应、列表空白、页面卡死。",
+   "fix": {
+    "frontend": "// 按堆栈定位崩溃行，高频根因与修法：\n// null/undefined 访问 → 可选链 + 默认值\nconst name = user?.profile?.name ?? '匿名';\n// 异步未 await / 竞态 → 统一 async 边界 + AbortController\n// 数组方法误用 → 先 Array.isArray 校验",
+    "backend": "// 若异常由脏数据触发：在接口层用 schema 校验并兜底默认值，保证字段恒存在。"
+   },
+   "verify": [
+    "复现路径不再抛异常",
+    "ErrorBoundary 兜底：单点崩溃不白屏",
+    "同类空值/边界用例进回归"
+   ],
+   "guard": "// React ErrorBoundary + 全局上报\nclass Boundary extends React.Component {\n  state = { err: null };\n  static getDerivedStateFromError(err) { return { err }; }\n  render() { return this.state.err ? <Fallback onRetry={() => this.setState({ err: null })} /> : this.props.children; }\n}",
+   "diff": "--- a/src/utils.js\n+++ b/src/utils.js\n@@ -2,5 +2,6 @@\n export function fullName(user) {\n-  return user.profile.firstName + ' ' + user.profile.lastName;\n+  // 空值兜底，避免脏数据导致整页崩溃\n+  return [user?.profile?.firstName, user?.profile?.lastName].filter(Boolean).join(' ') || '匿名';\n }"
+  },
+  "func-network-error": {
+   "category": "function",
+   "severity": "high",
+   "title": "接口/请求失败（4xx、5xx 或网络错误）",
+   "rootCause": "页面依赖的请求返回错误状态或根本发不出去：路由不存在、鉴权过期、跨域被拦、后端异常，直接导致数据加载失败。",
+   "fix": {
+    "frontend": "// 统一请求层：超时 + 重试 + 错误分类提示\nconst r = await fetch(url, { signal: AbortSignal.timeout(10000) });\nif (r.status === 401) return location.assign('/login');\nif (!r.ok) throw new Error(`HTTP ${r.status}`);",
+    "backend": "// 404：核对路由注册与网关转发规则\n// 401/403：检查 token 过期与权限中间件顺序\n// 5xx：按 traceId 查日志；CORS：回显白名单 Origin 而非 *"
+   },
+   "verify": [
+    "DevTools Network 中该请求返回 200",
+    "401 场景自动跳登录而非静默失败",
+    "弱网下有重试与提示"
+   ],
+   "guard": "// 接口契约测试进 CI：关键路由状态码断言\n// 前端监控：fetch 失败率 > 1% 告警",
+   "diff": "--- a/src/request.js\n+++ b/src/request.js\n@@ -1,5 +1,9 @@\n export async function request(url, opts) {\n-  return fetch(url, opts).then(r => r.json());\n+  const r = await fetch(url, { ...opts, signal: AbortSignal.timeout(10000) });\n+  if (r.status === 401) { location.assign('/login'); throw new Error('unauthorized'); }\n+  if (!r.ok) throw new Error(`HTTP ${r.status} ${url}`);\n+  return r.json();\n }"
+  },
+  "func-resource-error": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "静态资源加载失败（图片/脚本/样式）",
+   "rootCause": "资源 404、路径大小写错误、CDN 失效或被拦截，表现为图片裂开、样式丢失、脚本功能缺失。",
+   "fix": {
+    "frontend": "<!-- 图片加兜底，避免裂图 -->\n<img src=\"/logo.png\" alt=\"Logo\" onerror=\"this.src='/fallback.png'\">\n// 关键脚本加载失败时降级提示而非静默",
+    "backend": "# 核对静态资源映射与部署产物完整性\n# Nginx: location /static/ { alias /var/www/static/; }\n# CI 部署后跑资源可达性检查（curl 关键 URL 断言 200）"
+   },
+   "verify": [
+    "DevTools Network 无红色失败资源",
+    "断 CDN 场景页面仍可用（降级生效）"
+   ],
+   "guard": "# 部署后冒烟：关键资源清单逐一 curl 断言 200\n# 前端监控 resource error 上报",
+   "diff": "--- a/public/index.html\n+++ b/public/index.html\n@@ -9,7 +9,7 @@\n-  <img src=\"/logo.png\">\n+  <img src=\"/logo.png\" alt=\"Logo\" onerror=\"this.src='/fallback.png'\">"
+  }
+ },
+ "knowledge": {
+  "sec-sqli": {
+   "category": "security",
+   "severity": "critical",
+   "title": "SQL 注入（含布尔/时间盲注）",
+   "rootCause": "用户输入拼接进 SQL，攻击者可拖库、改库、写文件；无回显时可用布尔/时间盲注逐位猜解。",
+   "test": "在参数后加 ' \" ) 观察报错；输入 1 AND 1=1 / 1 AND 1=2 对比响应；输入 1;WAITFOR DELAY 或 SLEEP(3) 看时延；用 sqlmap 对授权目标跑 --batch --level 2。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 一律参数化查询，禁止字符串拼接\nconst rows = await db.query('SELECT * FROM users WHERE name = $1', [name]);\n// ORM 中禁止 raw 拼接；LIKE 用参数 + 转义 % _"
+   },
+   "verify": [
+    "注入 payload 后响应与正常一致或返回 400，无报错/时延差异",
+    "sqlmap 复跑无注入点"
+   ],
+   "guard": "CI 加 sqlmap 回归 + ESLint 禁止 db.query 模板字符串拼接"
+  },
+  "sec-nosqli": {
+   "category": "security",
+   "severity": "high",
+   "title": "NoSQL 注入（$gt/$ne/$where）",
+   "rootCause": "Mongo 等直接把请求对象当查询条件，{\"pwd\":{\"$ne\":\"\"}} 可绕过登录；$where 可执行 JS。",
+   "test": "登录处提交 JSON {\"user\":{\"$ne\":\"\"},\"pwd\":{\"$ne\":\"\"}}；参数加 [$ne]=1 观察是否绕过；搜索处试 $where/sleep。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 入口强制类型：只接受字符串/数字\nconst user = String(req.body.user ?? '');\n// 或 schema 校验拒绝对象；禁用 $where，Mongo 启动 --noscripting"
+   },
+   "verify": [
+    "对象型 payload 返回 400",
+    "登录绕过用例失败（正确拒绝）"
+   ],
+   "guard": "zod/joi 严格类型校验进 CI；Mongo 禁用服务端 JS"
+  },
+  "sec-cmdi": {
+   "category": "security",
+   "severity": "critical",
+   "title": "OS 命令注入",
+   "rootCause": "输入拼进 shell 命令（ping/convert/ffmpeg），; | && ` $() 可执行任意命令。",
+   "test": "参数追加 ;id、|whoami、$(sleep 3) 观察回显/时延；文件名/URL 类参数重点测。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 不经过 shell：execFile + 参数数组\nimport { execFile } from 'node:child_process';\nexecFile('ping', ['-c', '4', host], cb);\n// 必须 shell 时白名单校验 host：/^[a-z0-9.-]+$/i"
+   },
+   "verify": [
+    "payload 无回显无时延",
+    "代码搜索 exec( 确认全部改 execFile"
+   ],
+   "guard": "ESLint no-restricted-syntax 拦截 child_process.exec；CI 注入用例"
+  },
+  "sec-path-traversal": {
+   "category": "security",
+   "severity": "critical",
+   "title": "路径穿越（../../ 读任意文件）",
+   "rootCause": "文件下载/预览接口拼接用户路径，../ 或 ..%2f 可跳出根目录读 /etc/passwd、配置、源码。",
+   "test": "下载参数试 ../../etc/passwd、..%252f..%252fetc/passwd、....//；读已知文件对比哈希确认。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 解析后校验仍在根目录内\nconst root = path.resolve(UPLOAD_DIR);\nconst file = path.resolve(root, userInput);\nif (!file.startsWith(root + path.sep)) return res.sendStatus(403);\n// 更稳：用 id 映射文件，不暴露路径"
+   },
+   "verify": [
+    "穿越 payload 返回 403/404",
+    "正常下载不受影响"
+   ],
+   "guard": "统一 safeJoin 工具函数，禁止路由内手写 path.join(根, 用户输入)"
+  },
+  "sec-file-upload": {
+   "category": "security",
+   "severity": "critical",
+   "title": "任意文件上传（getshell）",
+   "rootCause": "只校验扩展名/前端类型，可传 .php/.jsp/.aspx 或双扩展名、%00 截断、解析漏洞（nginx/IIS）执行代码。",
+   "test": "上传 a.php.jpg、a.php%00.jpg、.htaccess、a.aspx;.jpg；改 Content-Type 绕过；访问上传目录确认是否解析执行。",
+   "fix": {
+    "frontend": "// 前端限制 accept 只是体验，不能作为防线。",
+    "backend": "// 白名单扩展名 + magic bytes + 重命名 + 独立域名/目录不解析\nconst ok = ['png', 'jpg', 'webp'].includes(ext) && magicMatch(buf);\nconst name = crypto.randomUUID() + '.' + ext;\n// 上传目录 nginx：location /uploads/ { default_type application/octet-stream; } 禁止脚本解析"
+   },
+   "verify": [
+    "脚本文件上传后被拒绝或访问时只下载不执行",
+    "上传目录无执行权限"
+   ],
+   "guard": "CI 上传用例矩阵（双扩展名/截断/ MIME 伪造）；存储与执行分离"
+  },
+  "sec-upload-xss": {
+   "category": "security",
+   "severity": "high",
+   "title": "SVG/HTML 上传型存储 XSS",
+   "rootCause": "允许上传 svg/html 且同域直链打开，内嵌脚本在站点上下文执行，偷会话。",
+   "test": "上传含 <script>alert(1)</script> 的 svg 与 html，直链打开看是否执行。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 上传文件放独立沙箱域名；或响应头强制下载\nres.setHeader('Content-Disposition', 'attachment');\nres.setHeader('Content-Security-Policy', \"default-src 'none'; sandbox\");\n// SVG 必须消毒（DOMPurify svg profile）后再 inline"
+   },
+   "verify": [
+    "svg/html 直链不执行脚本",
+    "CSP sandbox 生效"
+   ],
+   "guard": "用户内容域与主站域分离；CI 上传 XSS 用例"
+  },
+  "sec-xxe": {
+   "category": "security",
+   "severity": "high",
+   "title": "XXE 外部实体注入",
+   "rootCause": "XML 解析器默认启用外部实体，可读写文件、SSRF、DoS（billion laughs）。",
+   "test": "XML 入口提交 <!DOCTYPE r [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><r>&x;</r>；OOXML(docx/xlsx)/svg 上传点同样测。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 禁用 DTD/外部实体（各语言解析器配置）\n// Java: factory.setFeature(\"http://apache.org/xml/features/disallow-doctype-decl\", true)\n// Node fast-xml-parser: { processEntities: false }"
+   },
+   "verify": [
+    "实体 payload 不返回文件内容",
+    "正常 XML 业务不受影响"
+   ],
+   "guard": "解析器安全配置集中封装；CI XXE 用例"
+  },
+  "sec-ssti": {
+   "category": "security",
+   "severity": "critical",
+   "title": "服务端模板注入（SSTI）",
+   "rootCause": "用户输入被当模板编译（Twig/Jinja/Freemarker/EJS），{{7*7}}→49 即可升级到 RCE。",
+   "test": "输入 {{7*7}}、${7*7}、<%= 7*7 %> 看是否回显 49；按引擎指纹选 payload。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 用户内容只做数据传入，不做模板源码\nres.render('page', { name: userInput }); // 模板内 <%= name %> 自动转义\n// 禁止 renderString(userInput)"
+   },
+   "verify": [
+    "{{7*7}} 原样输出不计算",
+    "代码搜索无动态编译用户输入"
+   ],
+   "guard": "ESLint 拦截 renderString/compile 接收变量；CI SSTI 用例"
+  },
+  "sec-deserialization": {
+   "category": "security",
+   "severity": "critical",
+   "title": "不安全反序列化",
+   "rootCause": "Java readObject/.NET BinaryFormatter/Python pickle/PHP unserialize 接收不可信数据可 RCE。",
+   "test": "识别 Cookie/参数中的序列化特征（rO0AB、AC ED、O:8:、gASV）；用 ysoserial/gadget 链在授权环境验证。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 改用 JSON 等数据格式；必须反序列化时白名单类\n// Java: ObjectInputFilter.Config.setSerialFilter(filter)\n// 签名+加密序列化 blob，拒绝未签名数据"
+   },
+   "verify": [
+    "gadget payload 被拒绝",
+    "业务改用 JSON 后功能正常"
+   ],
+   "guard": "依赖审计（commons-collections 等 gadget 库版本）；CI 反序列化用例"
+  },
+  "sec-xss-reflected": {
+   "category": "security",
+   "severity": "critical",
+   "title": "反射型 XSS",
+   "rootCause": "搜索词/错误信息等回显未转义，诱导点击链接即在受害者浏览器执行脚本。",
+   "test": "参数注入 <script>alert(1)</script>、\"><img src=x onerror=alert(1)>、javascript:alert(1)；检查回显点上下文（HTML/属性/JS/URL）。",
+   "fix": {
+    "frontend": "// 输出转义按上下文：HTML 用 textContent；属性加引号+转义；JS 上下文用 JSON.stringify\nel.textContent = q;",
+    "backend": "// 模板默认转义；CSP script-src 'self' 兜底\nres.setHeader('Content-Security-Policy', \"default-src 'self'; script-src 'self'\");"
+   },
+   "verify": [
+    "OWASP XSS cheat sheet 向量均不执行",
+    "CSP 拦截报告可见"
+   ],
+   "guard": "CI 注入向量库回归；评审清单覆盖所有回显点"
+  },
+  "sec-xss-dom": {
+   "category": "security",
+   "severity": "high",
+   "title": "DOM 型 XSS（source→sink 链）",
+   "rootCause": "location.hash/search、postMessage、URL 参数未经消毒进入 innerHTML/eval/document.write 等 sink。",
+   "test": "审计 JS 中 source 与 sink；构造 #<img src=x onerror=alert(1)> 等触发；用 DOMPurify 前后对比。",
+   "fix": {
+    "frontend": "// sink 改安全 API\nout.textContent = decodeURIComponent(location.hash.slice(1));\n// 富文本：DOMPurify.sanitize",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "触发 payload 不执行",
+    "ESLint 无 innerHTML 直拼"
+   ],
+   "guard": "eslint no-unsanitized 插件；CI DOM XSS 用例"
+  },
+  "sec-xss-mutation": {
+   "category": "security",
+   "severity": "medium",
+   "title": "mXSS（消毒后浏览器重解析变异）",
+   "rootCause": "DOMPurify 消毒后的「安全」HTML 在 innerHTML 重解析时因命名空间/注释嵌套变异出脚本（svg/math 混淆）。",
+   "test": "用 mXSS payload（<svg><p><style><!--</style><img src=x onerror=alert(1)>）测试富文本渲染。",
+   "fix": {
+    "frontend": "// 升级 DOMPurify 到最新；避免二次 innerHTML 重解析消毒结果\n// 渲染用 iframe sandbox 或 Trusted Types",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "mXSS 向量不执行",
+    "DOMPurify 版本无已知 CVE"
+   ],
+   "guard": "依赖自动升级（dependabot）；Trusted Types 强制"
+  },
+  "sec-csrf": {
+   "category": "security",
+   "severity": "high",
+   "title": "状态变更请求无 CSRF 防护",
+   "rootCause": "写操作仅靠 Cookie 鉴权，第三方页面可伪造请求替用户转账/改密/发帖。",
+   "test": "写接口去掉 token/自定义头后从外域表单或 fetch(no-cors) 提交，观察是否成功；检查 SameSite 是否 None/缺失。",
+   "fix": {
+    "frontend": "// 请求带自定义头或 token\nfetch('/api/transfer', { method: 'POST', headers: { 'X-CSRF-Token': token }, body });",
+    "backend": "// 双保险：SameSite=Lax + 同步 token 校验\napp.use(csrf({ cookie: { sameSite: 'lax' } }));"
+   },
+   "verify": [
+    "外域伪造请求被 403",
+    "正常流程 token 校验通过"
+   ],
+   "guard": "CI 跨站伪造用例；写接口默认经过 csrf 中间件"
+  },
+  "sec-csrf-json": {
+   "category": "security",
+   "severity": "medium",
+   "title": "JSON CSRF（text/plain 绕过预检）",
+   "rootCause": "后端接受 text/plain 的 JSON body，攻击者用简单请求绕过 CORS 预检发起跨站写操作。",
+   "test": "外域用 fetch(url,{method:\"POST\",headers:{\"Content-Type\":\"text/plain\"},body:JSON.stringify(...)}) 测试写接口。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 写接口强制 application/json 且校验自定义头\nif (!req.is('application/json')) return res.sendStatus(415);\nif (!req.get('X-Requested-With')) return res.sendStatus(403);"
+   },
+   "verify": [
+    "text/plain 伪造被 415/403",
+    "正常 JSON 请求不受影响"
+   ],
+   "guard": "网关层统一 Content-Type 白名单"
+  },
+  "sec-open-redirect": {
+   "category": "security",
+   "severity": "medium",
+   "title": "开放重定向（钓鱼跳板）",
+   "rootCause": "跳转参数未校验，?url=https://evil 可把用户从可信域带到钓鱼站，也可绕过 OAuth 回调校验。",
+   "test": "redirect/next/url/callback 参数试外域、//evil、/\\evil、https:evil、%2f%2fevil。",
+   "fix": {
+    "frontend": "// 只允许站内相对路径\nconst next = new URL(req.query.next || '/', 'https://app.example.com');\nif (next.origin !== 'https://app.example.com') return res.redirect('/');",
+    "backend": "// 或白名单域名集合校验"
+   },
+   "verify": [
+    "外域 payload 全部落回站内",
+    "正常回跳不受影响"
+   ],
+   "guard": "统一 safeRedirect 工具；CI 重定向用例"
+  },
+  "sec-cors-reflect": {
+   "category": "security",
+   "severity": "high",
+   "title": "CORS 反射 Origin 且带凭据（含 null）",
+   "rootCause": "Access-Control-Allow-Origin 回显任意 Origin（含 null）且 Allow-Credentials:true，任意站点可带 Cookie 读用户数据。",
+   "test": "curl -H \"Origin: https://evil.example\" -I 接口，看是否回显且 credentials:true；再试 Origin: null。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 严格白名单，禁止回显与 null\nconst ALLOWED = new Set(['https://app.example.com']);\nif (ALLOWED.has(origin)) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }"
+   },
+   "verify": [
+    "evil/null Origin 不回显",
+    "白名单域正常"
+   ],
+   "guard": "CORS 配置中心化 + CI 断言"
+  },
+  "sec-prototype-pollution": {
+   "category": "security",
+   "severity": "high",
+   "title": "原型污染（__proto__/constructor）",
+   "rootCause": "merge/clone/set 深操作接受 __proto__ 键，污染 Object.prototype 导致逻辑绕过甚至 RCE（Node 模板引擎）。",
+   "test": "JSON body 提交 {\"__proto__\":{\"polluted\":1}} 后观察 {} 是否带 polluted；query 试 __proto__[x]=1。",
+   "fix": {
+    "frontend": "// 前端 merge 用 structuredClone 或过滤危险键\nconst BAD = new Set(['__proto__', 'constructor', 'prototype']);",
+    "backend": "// 后端递归 merge 跳过危险键；或 Object.create(null) 作目标\nfunction safeMerge(t, s) { for (const k of Object.keys(s)) { if (BAD.has(k)) continue; /*...*/ } }"
+   },
+   "verify": [
+    "污染 payload 后 ({}).polluted 为 undefined",
+    "正常合并不受影响"
+   ],
+   "guard": "CI 原型污染用例；lodash 升级 >=4.17.21"
+  },
+  "sec-dom-clobbering": {
+   "category": "security",
+   "severity": "medium",
+   "title": "DOM Clobbering（id/name 覆盖全局变量）",
+   "rootCause": "注入 <img name=config> 等元素覆盖 window.config/表单属性，绕过 JS 逻辑或 sanitizer。",
+   "test": "注入 <a id=config href=x>、<form name=attributes> 观察 JS 全局是否被覆盖。",
+   "fix": {
+    "frontend": "// 关键配置用闭包/模块变量，不读 window 全局\n// sanitizer 开启 DOMPurify SANITIZE_DOM 默认防护",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "clobber payload 不影响逻辑",
+    "代码无 window[name] 动态读取"
+   ],
+   "guard": "ESLint 禁止 window 动态属性读取；Trusted Types"
+  },
+  "sec-postmessage": {
+   "category": "security",
+   "severity": "high",
+   "title": "postMessage 无 origin/类型校验",
+   "rootCause": "message 监听不校验 e.origin 与数据结构，任意窗口可注入指令（改 DOM、偷 token、触发操作）。",
+   "test": "审计 addEventListener(\"message\")；外域 iframe 向目标 postMessage 伪造指令观察是否执行。",
+   "fix": {
+    "frontend": "// 校验来源 + 结构\nwindow.addEventListener('message', (e) => {\n  if (e.origin !== 'https://trusted.example') return;\n  if (typeof e.data?.type !== 'string') return;\n});",
+    "backend": "// 发送方指定 targetOrigin，禁止 '*'\niframe.contentWindow.postMessage(msg, 'https://trusted.example');"
+   },
+   "verify": [
+    "外域消息被忽略",
+    "正常通信不受影响"
+   ],
+   "guard": "CI 跨域消息用例；评审清单覆盖 message 监听"
+  },
+  "sec-websocket": {
+   "category": "security",
+   "severity": "high",
+   "title": "WebSocket 无鉴权 / CSWSH",
+   "rootCause": "WS 握手不校验 Origin/Token，跨站页面可建立连接替用户收发消息（跨站 WebSocket 劫持）。",
+   "test": "外域页面 new WebSocket(\"wss://目标/ws\") 带 Cookie 观察是否连通并收到私有数据。",
+   "fix": {
+    "frontend": "// 前端连接带短期 token\nnew WebSocket('wss://x/ws?token=' + shortLivedToken);",
+    "backend": "// 握手校验 Origin 白名单 + token\nif (!ALLOWED_ORIGINS.has(req.headers.origin)) return socket.destroy();"
+   },
+   "verify": [
+    "外域握手被拒绝",
+    "正常客户端连通"
+   ],
+   "guard": "WS 与 HTTP 共用鉴权中间件；CI CSWSH 用例"
+  },
+  "sec-vert-priv": {
+   "category": "security",
+   "severity": "high",
+   "title": "垂直越权：普通用户调用管理接口",
+   "rootCause": "管理接口只判登录不判角色，普通用户直接请求 /api/admin/* 即可操作。",
+   "test": "用普通账号 token 请求全部管理路由（方法+路径矩阵），期望 403。",
+   "fix": {
+    "frontend": "// 前端隐藏菜单不是权限边界。",
+    "backend": "// 路由级角色中间件，默认拒绝\napp.use('/api/admin', auth, requireRole('admin'));"
+   },
+   "verify": [
+    "双账号越权矩阵全 403",
+    "管理员正常"
+   ],
+   "guard": "CI 权限矩阵测试；新路由默认 deny"
+  },
+  "sec-missing-auth": {
+   "category": "security",
+   "severity": "critical",
+   "title": "接口完全无鉴权（匿名可读写）",
+   "rootCause": "路由遗漏 auth 中间件，匿名即可读用户数据/写业务。",
+   "test": "不带任何 Cookie/token 请求所有 API，列出 200 的写接口与含个人数据的读接口。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 全局默认鉴权，公开路由显式豁免\napp.use('/api', auth);\napp.use('/api/public', publicRouter);"
+   },
+   "verify": [
+    "匿名请求私有接口 401",
+    "公开接口清单评审过"
+   ],
+   "guard": "CI 匿名访问矩阵；路由注册 lint 必须带 auth 或 public 标记"
+  },
+  "sec-mass-assignment": {
+   "category": "security",
+   "severity": "high",
+   "title": "批量赋值：role/isAdmin 可被提交",
+   "rootCause": "直接把 req.body 展开进模型，攻击者多传 role:\"admin\"、balance:999999 即提权/改余额。",
+   "test": "注册/更新接口额外提交 role/isAdmin/balance 字段，查库确认是否生效。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 白名单取字段\nconst { name, email } = req.body;\nawait User.update(id, { name, email });\n// 或 schema .strip() 丢弃未知键"
+   },
+   "verify": [
+    "越权字段不生效",
+    "正常字段更新正常"
+   ],
+   "guard": "CI  mass-assignment 用例；ORM 禁用全量 assign"
+  },
+  "sec-verb-tamper": {
+   "category": "security",
+   "severity": "medium",
+   "title": "HTTP 方法篡改绕过鉴权",
+   "rootCause": "鉴权只挂在 GET/POST，改 PUT/PATCH/HEAD/X-HTTP-Method-Override 可绕过。",
+   "test": "对受保护路由换方法重放，观察是否 200。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 鉴权挂在路由组而非方法；网关禁用 override 头\napp.use('/api/admin', auth); // 所有方法生效"
+   },
+   "verify": [
+    "全方法矩阵均 403",
+    "正常方法不受影响"
+   ],
+   "guard": "CI 方法矩阵；网关剥离 X-HTTP-Method-Override"
+  },
+  "sec-jwt-none": {
+   "category": "security",
+   "severity": "critical",
+   "title": "JWT alg=none / 弱密钥可伪造",
+   "rootCause": "库接受 alg:none 或密钥为 secret/123456 等弱值，攻击者自签 admin token。",
+   "test": "解码 token 改 alg:none 去签名重放；用 jwt_tool/hashcat 跑弱密钥字典。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 固定算法 + 强密钥（>=256bit 随机）\njwt.verify(token, KEY, { algorithms: ['HS256'] });\n// 密钥来自 KMS/环境变量，禁止硬编码"
+   },
+   "verify": [
+    "none/弱签 token 被拒",
+    "正常 token 通过"
+   ],
+   "guard": "CI JWT 攻击用例；密钥轮换机制"
+  },
+  "sec-jwt-alg": {
+   "category": "security",
+   "severity": "high",
+   "title": "JWT RS256→HS256 算法混淆",
+   "rootCause": "服务端用公钥做 HMAC 密钥验证 HS256，公钥公开即可伪造 token。",
+   "test": "取公钥，用 HS256 以其为密钥自签 token 重放。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// verify 显式 algorithms 白名单，与签发算法一致\njwt.verify(token, publicKey, { algorithms: ['RS256'] });"
+   },
+   "verify": [
+    "混淆 token 被拒",
+    "RS256 正常"
+   ],
+   "guard": "CI 算法混淆用例"
+  },
+  "sec-jwt-exp": {
+   "category": "security",
+   "severity": "medium",
+   "title": "JWT 无过期 / 无法吊销",
+   "rootCause": "token 无 exp 或过期极长，泄露后永久有效；改密/退出后旧 token 仍可用。",
+   "test": "解码看 exp；退出/改密后用旧 token 请求是否仍 200。",
+   "fix": {
+    "frontend": "// 前端存短期 access + 静默 refresh",
+    "backend": "// access 15min + refresh 轮换 + 吊销黑名单（jti）\njwt.sign({ sub }, KEY, { expiresIn: '15m' });"
+   },
+   "verify": [
+    "旧 token 退出后 401",
+    "过期 token 401"
+   ],
+   "guard": "CI 会话生命周期用例"
+  },
+  "sec-session-fixation": {
+   "category": "security",
+   "severity": "high",
+   "title": "会话固定攻击",
+   "rootCause": "登录前后 session id 不变，攻击者先种一个 sid 诱导受害者登录即接管会话。",
+   "test": "登录前记录 Cookie sid，登录后对比是否变化。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 登录成功重新生成会话\nreq.session.regenerate(() => { req.session.userId = user.id; });"
+   },
+   "verify": [
+    "登录后 sid 变化",
+    "旧 sid 失效"
+   ],
+   "guard": "CI 会话固定用例"
+  },
+  "sec-logout-invalid": {
+   "category": "security",
+   "severity": "medium",
+   "title": "退出/改密后会话仍有效",
+   "rootCause": "退出只清前端 Cookie，服务端 session/token 未销毁。",
+   "test": "退出后重放旧 Cookie/token 请求私有接口。",
+   "fix": {
+    "frontend": "// 退出同时清本地存储",
+    "backend": "// 服务端销毁 session / 加入吊销列表\nreq.session.destroy(); await revokeToken(jti);"
+   },
+   "verify": [
+    "重放 401",
+    "多端退出策略明确"
+   ],
+   "guard": "CI 退出重放用例"
+  },
+  "sec-brute-force": {
+   "category": "security",
+   "severity": "high",
+   "title": "登录无速率限制/锁定",
+   "rootCause": "可无限次试密码，撞库/暴力破解成本低。",
+   "test": "同账号连续错密 50 次观察是否限流/锁定/验证码。",
+   "fix": {
+    "frontend": "// 失败提示统一，不暴露账号是否存在",
+    "backend": "// 限流 + 指数退避 + 验证码\nconst limit = rateLimit({ windowMs: 15 * 60_000, max: 10 });\napp.post('/login', limit, handler);"
+   },
+   "verify": [
+    "超限后 429/验证码",
+    "正常登录不受影响"
+   ],
+   "guard": "CI 爆破用例；告警异常登录"
+  },
+  "sec-username-enum": {
+   "category": "security",
+   "severity": "medium",
+   "title": "用户名枚举（响应差异）",
+   "rootCause": "「用户不存在」与「密码错误」提示不同，或时延差异，可批量探测有效账号。",
+   "test": "对比存在/不存在账号的响应文案、状态码、时延。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 统一提示「账号或密码错误」；不存在账号也跑一次哈希比较抹平时延"
+   },
+   "verify": [
+    "两类响应不可区分",
+    "时延差 < 噪声"
+   ],
+   "guard": "CI 枚举用例"
+  },
+  "sec-reset-token": {
+   "category": "security",
+   "severity": "high",
+   "title": "密码重置令牌缺陷（可预测/不过期/可复用/Host 投毒）",
+   "rootCause": "重置 token 用时间戳/自增 id、无过期、用后不失效；重置链接 Host 取自请求头可被投毒指向攻击者域。",
+   "test": "分析 token 熵；过期/复用重放；改 Host/X-Forwarded-Host 发重置请求看链接域名。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 加密随机 token + 15min 过期 + 一次性 + 固定域名生成链接\nconst token = crypto.randomBytes(32).toString('hex');\nconst link = 'https://app.example.com/reset?token=' + token;"
+   },
+   "verify": [
+    "重放/过期/投毒均失败",
+    "正常重置流程通过"
+   ],
+   "guard": "CI 重置攻击用例；Host 头白名单"
+  },
+  "sec-2fa-bypass": {
+   "category": "security",
+   "severity": "high",
+   "title": "2FA 可绕过 / 无频控",
+   "rootCause": "验证码 4-6 位无频控可爆破；或存在跳过 2FA 的备用路由/响应篡改（false→true）。",
+   "test": "爆破 OTP 观察限流；直接请求 2FA 后的接口；改响应包测试前端是否放行。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// OTP 限流 5 次 + 过期 + 服务端强制校验状态\nif (!user.mfaVerified) return res.sendStatus(403);"
+   },
+   "verify": [
+    "爆破被限流",
+    "跳过路由 403"
+   ],
+   "guard": "CI 2FA 绕过用例"
+  },
+  "sec-oauth-state": {
+   "category": "security",
+   "severity": "high",
+   "title": "OAuth 缺 state / redirect_uri 校验不严",
+   "rootCause": "无 state 可 CSRF 绑定攻击者账号；redirect_uri 前缀匹配可被绕过偷 code。",
+   "test": "去掉 state 重放授权流程；redirect_uri 试 https://app.example.com.evil、开放重定向组合。",
+   "fix": {
+    "frontend": "// 前端生成并校验 state",
+    "backend": "// redirect_uri 精确白名单匹配\nif (!REDIRECT_WHITELIST.includes(uri)) return res.sendStatus(400);"
+   },
+   "verify": [
+    "缺 state/非法 uri 被拒",
+    "正常授权通过"
+   ],
+   "guard": "CI OAuth 攻击用例"
+  },
+  "sec-token-url": {
+   "category": "security",
+   "severity": "high",
+   "title": "token/凭据出现在 URL",
+   "rootCause": "URL 进浏览器历史、Referer、代理与访问日志，token 随链接扩散。",
+   "test": "抓包/查日志看 query 是否含 token/session/key；分享链接是否带凭据。",
+   "fix": {
+    "frontend": "// 改放 Authorization 头或 HttpOnly Cookie",
+    "backend": "// 日志脱敏 query；短效一次性交换码代替长 token"
+   },
+   "verify": [
+    "URL 无凭据",
+    "历史日志已脱敏"
+   ],
+   "guard": "CI 日志扫描 token 模式"
+  },
+  "sec-localstorage-token": {
+   "category": "security",
+   "severity": "medium",
+   "title": "敏感 token 存 localStorage",
+   "rootCause": "任何 XSS 都可读 localStorage 偷 token；HttpOnly Cookie 才能免疫。",
+   "test": "Console 执行 localStorage 查看是否含 token；结合 XSS 验证可窃取。",
+   "fix": {
+    "frontend": "// 改 HttpOnly Cookie 会话；或内存 + 静默 refresh",
+    "backend": "// 下发 HttpOnly+Secure+SameSite Cookie"
+   },
+   "verify": [
+    "localStorage 无 token",
+    "XSS 读不到会话"
+   ],
+   "guard": "评审清单禁止 localStorage 存凭据"
+  },
+  "sec-random-predictable": {
+   "category": "security",
+   "severity": "high",
+   "title": "可预测随机数生成凭据",
+   "rootCause": "Math.random()/时间戳生成 token/验证码/重置链接，可被推算。",
+   "test": "采样 token 分析熵与模式；Math.random 种子可恢复。",
+   "fix": {
+    "frontend": "// 前端不生成安全凭据",
+    "backend": "// 一律 crypto\nconst token = crypto.randomBytes(32).toString('hex');\nconst otp = crypto.randomInt(0, 1_000_000);"
+   },
+   "verify": [
+    "凭据熵 >= 128bit",
+    "代码无 Math.random 生成凭据"
+   ],
+   "guard": "ESLint 拦截 Math.random 用于安全场景"
+  },
+  "sec-weak-hash": {
+   "category": "security",
+   "severity": "high",
+   "title": "弱哈希存密码（MD5/SHA1/无盐）",
+   "rootCause": "拖库后彩虹表/GPU 秒破；无盐可批量撞库。",
+   "test": "查库哈希格式；用 hashcat 跑样本验证破解成本。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// argon2id / bcrypt(cost>=12)\nimport argon2 from 'argon2';\nconst hash = await argon2.hash(pwd);"
+   },
+   "verify": [
+    "新密码哈希为 argon2/bcrypt",
+    "旧哈希登录时透明升级"
+   ],
+   "guard": "CI 哈希算法断言；泄露应急预案"
+  },
+  "sec-hardcoded-crypto": {
+   "category": "security",
+   "severity": "high",
+   "title": "硬编码密钥/IV / ECB 模式",
+   "rootCause": "密钥写死在代码/前端 bundle，IV 固定或 ECB 模式泄露明文模式。",
+   "test": "搜代码 key/secret/iv 常量；前端 bundle 搜密钥；密文块重复观察 ECB 特征。",
+   "fix": {
+    "frontend": "// 前端不持有服务端密钥",
+    "backend": "// KMS/环境变量注入；AES-GCM 随机 IV\nconst iv = crypto.randomBytes(12);"
+   },
+   "verify": [
+    "代码无硬编码密钥",
+    "GCM+随机 IV"
+   ],
+   "guard": "gitleaks CI 扫描；密钥轮换"
+  },
+  "sec-timing-attack": {
+   "category": "security",
+   "severity": "low",
+   "title": "时序攻击比较 token/密码",
+   "rootCause": "逐字节比较提前返回，时延差可逐位猜解签名/token。",
+   "test": "统计不同前缀正确长度下的响应时延差。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 恒时比较\ncrypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));"
+   },
+   "verify": [
+    "时延无显著差异",
+    "正常校验通过"
+   ],
+   "guard": "CI 禁止 === 比较签名"
+  },
+  "sec-cache-poison": {
+   "category": "security",
+   "severity": "high",
+   "title": "Web 缓存投毒（未键控输入）",
+   "rootCause": "缓存键不含 X-Forwarded-Host 等头，攻击者注入恶意头使缓存向所有用户投毒（XSS/重定向）。",
+   "test": "带 X-Forwarded-Host: evil 请求可缓存页面，换正常请求看是否命中投毒响应。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 缓存键包含所有影响响应的头；或剥离不可信头\n// CDN 配置 Vary/Cache-Key 白名单"
+   },
+   "verify": [
+    "投毒头不影响他人响应",
+    "缓存命中率正常"
+   ],
+   "guard": "CI 缓存投毒用例；CDN 配置评审"
+  },
+  "sec-request-smuggling": {
+   "category": "security",
+   "severity": "high",
+   "title": "HTTP 请求走私（CL.TE/TE.CL）",
+   "rootCause": "前后端对 Content-Length/Transfer-Encoding 解析不一致，可走私请求绕过鉴权/投毒。",
+   "test": "授权环境用 smuggler 工具探测 CL.TE/TE.CL 时延差。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 统一 HTTP/2 端到端；或网关规范化拒绝歧义请求\n// nginx: proxy_http_version 1.1; 拒绝同时带 CL+TE"
+   },
+   "verify": [
+    "歧义请求被 400",
+    "正常请求不受影响"
+   ],
+   "guard": "网关层 TE 白名单；CI 走私探测"
+  },
+  "sec-header-inj": {
+   "category": "security",
+   "severity": "medium",
+   "title": "CRLF / 响应头注入",
+   "rootCause": "用户输入进响应头未过滤 \\r\\n，可注入 Set-Cookie/Location 甚至 XSS。",
+   "test": "参数加 %0d%0aSet-Cookie:%20a=1 观察响应头。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 头值过滤 CR/LF；框架升级（Node 已默认拒绝）\nres.setHeader('X-Name', String(v).replace(/[\\r\\n]/g, ''));"
+   },
+   "verify": [
+    "CRLF payload 被拒/过滤",
+    "正常头不受影响"
+   ],
+   "guard": "CI 头注入用例"
+  },
+  "sec-host-header": {
+   "category": "security",
+   "severity": "medium",
+   "title": "Host 头注入（缓存/链接投毒）",
+   "rootCause": "应用用 Host 生成链接/路由，伪造 Host 可投毒缓存、劫持重置链接。",
+   "test": "改 Host/X-Forwarded-Host 请求，观察生成链接与缓存内容。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 固定站点域名配置，不信任 Host\nconst BASE = process.env.PUBLIC_ORIGIN; // https://app.example.com"
+   },
+   "verify": [
+    "伪造 Host 不影响链接",
+    "多域名走白名单"
+   ],
+   "guard": "CI Host 注入用例"
+  },
+  "sec-subdomain-takeover": {
+   "category": "security",
+   "severity": "high",
+   "title": "子域接管（悬空 CNAME）",
+   "rootCause": "子域 CNAME 指向已释放的第三方服务（S3/GitHub Pages/Heroku），攻击者注册同名服务即控制子域。",
+   "test": "枚举子域 CNAME，对照各服务商接管指纹（NoSuchBucket 等）；dig 验证悬空。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 清理悬空 DNS 记录；第三方服务绑定自定义域校验"
+   },
+   "verify": [
+    "无悬空 CNAME",
+    "DNS 巡检自动化"
+   ],
+   "guard": "子域监控 + 接管指纹扫描进 CI"
+  },
+  "sec-dependency-cve": {
+   "category": "security",
+   "severity": "high",
+   "title": "依赖组件已知 CVE（OWASP A06）",
+   "rootCause": "lodash/jQuery/fastjson/log4j 等旧版本带已知 RCE/XSS，攻击者指纹识别后定向打。",
+   "test": "npm audit / retire.js / 指纹识别前端库版本；对照 CVE 库。",
+   "fix": {
+    "frontend": "// 升级前端库；删除无用依赖",
+    "backend": "// npm audit fix；锁定版本 + dependabot\nnpm ci --ignore-scripts"
+   },
+   "verify": [
+    "audit 无 high/critical",
+    "版本清单入库"
+   ],
+   "guard": "CI npm audit 门禁；SBOM 管理"
+  },
+  "sec-source-map": {
+   "category": "security",
+   "severity": "medium",
+   "title": "生产 source map 泄露源码",
+   "rootCause": ".map 可还原全部源码与注释（含内部接口/密钥线索）。",
+   "test": "请求 bundle.js.map 看是否 200；bundle 尾部 sourceMappingURL。",
+   "fix": {
+    "frontend": "// 构建关闭生产 sourcemap 或仅上传错误平台\n// vite: build.sourcemap=false",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    ".map 404",
+    "错误平台仍可解析堆栈"
+   ],
+   "guard": "CI 产物检查禁止 .map 发布"
+  },
+  "sec-debug-endpoint": {
+   "category": "security",
+   "severity": "high",
+   "title": "调试端点暴露（debug/trace/pprof/actuator）",
+   "rootCause": "开发调试路由带上生产，泄露环境/堆栈/内存甚至执行代码。",
+   "test": "探测 /debug /trace /__debug__ /actuator /pprof /graphql-playground 等。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 调试路由仅 development 注册\nif (process.env.NODE_ENV !== 'production') app.use(debugRouter);"
+   },
+   "verify": [
+    "生产探测全 404",
+    "开发环境可用"
+   ],
+   "guard": "CI 环境断言；路由注册 lint"
+  },
+  "sec-directory-listing": {
+   "category": "security",
+   "severity": "medium",
+   "title": "目录浏览开启",
+   "rootCause": "autoindex on 暴露目录结构与备份文件。",
+   "test": "访问无 index 的目录看是否列目录。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# nginx: autoindex off;（默认）\n# 上传目录禁止列出"
+   },
+   "verify": [
+    "目录请求 403/404",
+    "正常文件可访问"
+   ],
+   "guard": "配置基线扫描"
+  },
+  "sec-http-methods": {
+   "category": "security",
+   "severity": "medium",
+   "title": "危险 HTTP 方法开启（PUT/DELETE/TRACE）",
+   "rootCause": "PUT 可写文件、TRACE 回显请求头（XST 偷 Cookie）。",
+   "test": "OPTIONS 看 Allow；发 TRACE 看是否回显；PUT 测试写权限。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# nginx 限方法\nif ($request_method !~ ^(GET|POST|HEAD|OPTIONS)$) { return 405; }"
+   },
+   "verify": [
+    "TRACE/PUT 405",
+    "业务方法正常"
+   ],
+   "guard": "CI 方法扫描"
+  },
+  "sec-tls-weak": {
+   "category": "security",
+   "severity": "medium",
+   "title": "弱 TLS 版本/加密套件",
+   "rootCause": "TLS1.0/1.1、RC4/3DES、出口级套件可被降级破解。",
+   "test": "testssl.sh / SSL Labs 扫描协议与套件。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# nginx\nssl_protocols TLSv1.2 TLSv1.3;\nssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:...;"
+   },
+   "verify": [
+    "评级 A 以上",
+    "旧协议握手失败"
+   ],
+   "guard": "证书/协议监控"
+  },
+  "sec-cert": {
+   "category": "security",
+   "severity": "high",
+   "title": "证书过期/域名不匹配/链不全",
+   "rootCause": "用户见警告即流失，且中间人可乘虚而入。",
+   "test": "openssl s_client 看有效期与 SAN；多子域逐一验证。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# certbot 自动续期 + 到期监控\ncertbot renew --deploy-hook \"nginx -s reload\""
+   },
+   "verify": [
+    "全子域证书有效",
+    "续期演练通过"
+   ],
+   "guard": "到期前 30 天告警"
+  },
+  "sec-referrer-leak": {
+   "category": "security",
+   "severity": "low",
+   "title": "Referrer 泄露敏感 URL",
+   "rootCause": "带 token 的页面外链跳转把凭据带给第三方。",
+   "test": "抓外链请求 Referer 头是否含敏感参数。",
+   "fix": {
+    "frontend": "// 敏感页加 <meta name=\"referrer\" content=\"no-referrer\">",
+    "backend": "// 响应头 Referrer-Policy: strict-origin-when-cross-origin"
+   },
+   "verify": [
+    "外链 Referer 无敏感信息",
+    "统计来源仍可用"
+   ],
+   "guard": "CI 头基线"
+  },
+  "sec-cache-sensitive": {
+   "category": "security",
+   "severity": "medium",
+   "title": "敏感响应可被缓存",
+   "rootCause": "含个人数据的响应无 Cache-Control: no-store，共享缓存/浏览器缓存泄露给下一位用户。",
+   "test": "登录态请求私有接口看 Cache-Control/Pragma；代理后换账号验证。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 私有响应统一\nres.setHeader('Cache-Control', 'no-store');"
+   },
+   "verify": [
+    "私有响应 no-store",
+    "静态资源缓存正常"
+   ],
+   "guard": "中间件按路由类型自动设缓存策略"
+  },
+  "sec-error-verbose": {
+   "category": "security",
+   "severity": "medium",
+   "title": "报错泄露堆栈/SQL/路径",
+   "rootCause": "生产抛原始异常，暴露表名、文件路径、框架版本，辅助攻击。",
+   "test": "触发 500（非法参数/断库）看响应体。",
+   "fix": {
+    "frontend": "// 前端兜底友好提示",
+    "backend": "// 统一错误处理：日志留细节，响应只给通用信息\napp.use((err, req, res, next) => { logger.error(err); res.status(500).json({ error: '服务异常' }); });"
+   },
+   "verify": [
+    "500 响应无堆栈",
+    "日志可追溯"
+   ],
+   "guard": "CI 错误响应断言"
+  },
+  "sec-log-sensitive": {
+   "category": "security",
+   "severity": "medium",
+   "title": "日志记录密码/token/个人信息",
+   "rootCause": "日志系统权限宽，敏感字段入日志等于二次泄露。",
+   "test": "搜日志 password/token/authorization/手机号模式。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 日志脱敏中间件：字段白名单 + 正则掩码\nlogger.info({ body: redact(req.body) });"
+   },
+   "verify": [
+    "日志无明文凭据",
+    "排障信息仍足够"
+   ],
+   "guard": "CI 日志扫描；日志平台权限收敛"
+  },
+  "sec-api-key-js": {
+   "category": "security",
+   "severity": "high",
+   "title": "前端硬编码密钥/API key",
+   "rootCause": "bundle 里的 secret 等于公开，可被盗用刷量/越权调后端。",
+   "test": "搜 bundle 中 key/secret/sk-/AKIA 模式；验证密钥权限。",
+   "fix": {
+    "frontend": "// 前端只拿短期受限 token；密钥放后端代理调用",
+    "backend": "// 后端代理第三方 API，密钥环境变量注入"
+   },
+   "verify": [
+    "bundle 无密钥",
+    "泄露密钥已轮换"
+   ],
+   "guard": "gitleaks + bundle 扫描进 CI"
+  },
+  "sec-rate-limit": {
+   "category": "security",
+   "severity": "high",
+   "title": "API 无速率限制（爬取/撞库/资源耗尽）",
+   "rootCause": "接口可被高频调用：拖数据、撞库、短信轰炸、DoS。",
+   "test": "压测单 IP 高频请求观察是否 429；分布式低频绕过测试。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 分层限流：IP + 用户 + 接口\nconst limit = rateLimit({ windowMs: 60_000, max: 120 });"
+   },
+   "verify": [
+    "超限 429",
+    "正常用户无感"
+   ],
+   "guard": "限流配置基线 + 告警"
+  },
+  "sec-sms-bomb": {
+   "category": "security",
+   "severity": "high",
+   "title": "短信/邮件接口无频控（轰炸）",
+   "rootCause": "发送接口无图形验证码/频控，被当轰炸机骚扰他人并烧钱。",
+   "test": "同手机号连续请求发送接口观察限制。",
+   "fix": {
+    "frontend": "// 发送前图形验证码 + 按钮冷却",
+    "backend": "// 手机号 1/min、10/day；IP 维度限流"
+   },
+   "verify": [
+    "超限拒绝",
+    "正常发送不受影响"
+   ],
+   "guard": "CI 频控用例；费用告警"
+  },
+  "sec-captcha-bypass": {
+   "category": "security",
+   "severity": "medium",
+   "title": "验证码可绕过/复用/识别",
+   "rootCause": "验证码不绑定会话、可复用、答案在响应里、或纯数字易 OCR。",
+   "test": "抓包看验证码是否随响应下发；同一码重复提交；去掉验证码字段重放。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 服务端绑定 session + 一次性 + 过期 + 行为验证码"
+   },
+   "verify": [
+    "复用/缺失/爆破均失败",
+    "正常流程通过"
+   ],
+   "guard": "CI 验证码用例"
+  },
+  "sec-payment-tamper": {
+   "category": "security",
+   "severity": "critical",
+   "title": "金额/价格前端可篡改",
+   "rootCause": "下单金额取自客户端提交，改包 0.01 元买 iPhone。",
+   "test": "拦截下单请求改 price/amount 重放，查订单实付。",
+   "fix": {
+    "frontend": "// 前端展示价仅供展示。",
+    "backend": "// 金额一律服务端按 SKU 重新计算\nconst total = await priceService.calc(items); // 不信任客户端金额"
+   },
+   "verify": [
+    "改包金额不生效",
+    "优惠计算服务端闭环"
+   ],
+   "guard": "CI 改包用例；对账告警"
+  },
+  "sec-callback-forge": {
+   "category": "security",
+   "severity": "critical",
+   "title": "支付/异步回调伪造（无签名/幂等）",
+   "rootCause": "回调接口不验签或可重放，伪造「已支付」通知直接发货/加余额。",
+   "test": "伪造回调报文重放；篡改金额/订单号；重复发送同一回调。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 验签 + 金额比对 + 幂等 + 主动查单兜底\nif (!verifySign(body, key)) return res.sendStatus(403);\nif (paid(body.orderNo)) return res.send('ok'); // 幂等"
+   },
+   "verify": [
+    "伪造/重放被拒",
+    "真实回调正常"
+   ],
+   "guard": "CI 回调用例；回调日志审计"
+  },
+  "sec-coupon-race": {
+   "category": "security",
+   "severity": "high",
+   "title": "优惠券/积分并发刷取",
+   "rootCause": "领取/核销「先查后改」，并发请求多次领取同一券。",
+   "test": "并发 50 请求领同一券，查领取记录数。",
+   "fix": {
+    "frontend": "// 按钮防抖只是体验",
+    "backend": "// 原子条件更新 + 唯一约束\nUPDATE coupon SET stock=stock-1 WHERE id=$1 AND stock>0;\nUNIQUE(user_id, coupon_id)"
+   },
+   "verify": [
+    "并发恰好成功库存数",
+    "重复领取被拒"
+   ],
+   "guard": "CI 并发守恒用例"
+  },
+  "sec-flow-skip": {
+   "category": "security",
+   "severity": "high",
+   "title": "业务流程可跳步",
+   "rootCause": "未支付可直接调发货/完成接口；状态机校验缺失。",
+   "test": "按乱序调用流程接口（创建→直接完成），观察是否成功。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 状态机显式校验迁移合法性\nconst ALLOWED = { created: ['paid'], paid: ['shipped'] };\nif (!ALLOWED[order.status]?.includes(next)) throw new Error('非法状态迁移');"
+   },
+   "verify": [
+    "跳步被拒",
+    "正常流程通过"
+   ],
+   "guard": "CI 状态机矩阵"
+  },
+  "sec-negative-qty": {
+   "category": "security",
+   "severity": "high",
+   "title": "负数数量/金额/整数溢出",
+   "rootCause": "数量 -1 使总价变负「退款」；超大数量溢出绕限。",
+   "test": "提交 qty=-1、amount=-100、qty=2^53 观察结果。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// schema 边界：int 1..99；金额正数上限\nz.number().int().min(1).max(99)"
+   },
+   "verify": [
+    "负数/溢出 400",
+    "正常边界通过"
+   ],
+   "guard": "CI 边界值矩阵"
+  },
+  "sec-rounding-abuse": {
+   "category": "security",
+   "severity": "medium",
+   "title": "分摊舍入薅羊毛",
+   "rootCause": "优惠分摊四舍五入方向可被利用，拆单凑整 repeatedly 赚分币差。",
+   "test": "构造多组拆单金额计算分摊差，累计观察收益。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 最大余数法分摊，差额固定归最后一项；以分为单位"
+   },
+   "verify": [
+    "分摊合计恒等于总额",
+    "拆单无套利空间"
+   ],
+   "guard": "CI 分摊守恒属性测试"
+  },
+  "sec-unicode-bypass": {
+   "category": "security",
+   "severity": "medium",
+   "title": "编码/Unicode 规范化绕过",
+   "rootCause": "双重编码、全角、同形字、大小写绕过黑名单过滤（ＷＡＦ/敏感词/路径）。",
+   "test": "payload 用 %252e%252e、．．／、＜ｓｃｒｉｐｔ＞ 等变体测试过滤点。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 先规范化再校验：decode 一次 + NFKC + 白名单而非黑名单"
+   },
+   "verify": [
+    "变体 payload 被拦",
+    "正常多语言输入不误杀"
+   ],
+   "guard": "CI 绕过向量库"
+  },
+  "sec-null-byte": {
+   "category": "security",
+   "severity": "medium",
+   "title": "空字节截断",
+   "rootCause": "%00 截断使校验看 .jpg 而落地 .php（旧运行时/特定库）。",
+   "test": "文件名/路径参数加 %00 测试。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 拒绝含 \\0 输入；运行时保持更新"
+   },
+   "verify": [
+    "%00 输入 400",
+    "正常输入不受影响"
+   ],
+   "guard": "CI 截断用例"
+  },
+  "sec-cookie-tossing": {
+   "category": "security",
+   "severity": "medium",
+   "title": "Cookie tossing / 子域覆盖",
+   "rootCause": "攻击者子域可写父域 Cookie 覆盖会话参数，配合会话固定。",
+   "test": "检查 Cookie Domain 是否过宽；子域能否覆盖关键 Cookie。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// Cookie 不设 Domain（host-only）；关键 Cookie 加 __Host- 前缀\nres.cookie('__Host-sid', token, { secure: true, path: '/', httpOnly: true });"
+   },
+   "verify": [
+    "子域无法覆盖",
+    "正常会话不受影响"
+   ],
+   "guard": "Cookie 基线扫描"
+  },
+  "sec-json-hijack": {
+   "category": "security",
+   "severity": "low",
+   "title": "JSON 劫持（顶层数组+GET）",
+   "rootCause": "旧浏览器可重写 Array 构造器跨域读 GET JSON 数组。",
+   "test": "检查私有数据是否 GET+顶层数组返回。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 私有数据 POST 或顶层对象包裹 + XSSI 前缀\nres.json({ data: rows });"
+   },
+   "verify": [
+    "私有接口非 GET 数组",
+    "现代浏览器无风险"
+   ],
+   "guard": "API 规范：私有数据不 GET 数组"
+  },
+  "sec-email-header": {
+   "category": "security",
+   "severity": "medium",
+   "title": "邮件头注入",
+   "rootCause": "联系表单姓名/邮箱含 \\r\\n 可注入 Bcc 群发垃圾邮件。",
+   "test": "字段加 %0d%0aBcc: victim@x 测试发信。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 过滤 CR/LF；用成熟邮件库的参数化 API"
+   },
+   "verify": [
+    "注入被拒",
+    "正常发信正常"
+   ],
+   "guard": "CI 邮件注入用例"
+  },
+  "sec-csv-injection": {
+   "category": "security",
+   "severity": "medium",
+   "title": "CSV 公式注入",
+   "rootCause": "导出 CSV 单元格以 =+-@ 开头，Excel 打开执行公式（DDE 外带数据）。",
+   "test": "提交 =cmd|' /C calc'!A0 作为昵称后导出打开。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 导出时危险前缀加 ' 转义\nconst safe = /^[=+\\-@]/.test(v) ? \"'\" + v : v;"
+   },
+   "verify": [
+    "导出打开不执行公式",
+    "数据可读"
+   ],
+   "guard": "CI 导出用例"
+  },
+  "sec-api-old": {
+   "category": "security",
+   "severity": "medium",
+   "title": "旧版 API 未下线（无防护遗留）",
+   "rootCause": "/api/v1 无鉴权无限流但仍在路由，成为绕过新防护的后门。",
+   "test": "枚举 v1/v2/beta/legacy 路径对比防护差异。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 旧版路由下线或挂同等防护 +  sunset 告警"
+   },
+   "verify": [
+    "旧版防护一致或 410",
+    "客户端迁移完成"
+   ],
+   "guard": "API 清单管理（OWASP API9）"
+  },
+  "sec-session-timeout": {
+   "category": "security",
+   "severity": "low",
+   "title": "会话永不超时 / 并发会话无限制",
+   "rootCause": "共用电脑长期登录泄露风险；异常多地登录无感知。",
+   "test": "检查 idle/absolute 超时配置；多端登录策略。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// idle 30min + absolute 7d；敏感操作二次验证"
+   },
+   "verify": [
+    "超时后 401",
+    "活跃会话无感续期"
+   ],
+   "guard": "会话策略基线"
+  },
+  "ui-horizontal-overflow": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "横向溢出出现意外滚动条",
+   "rootCause": "固定宽度/长单词/100vw 含滚动条导致移动端横向滚动，体验破碎。",
+   "test": "320/375/768 宽度下检查 document.scrollWidth > innerWidth；定位溢出元素。",
+   "fix": {
+    "frontend": "/* 长文本断行 + 媒体自适应 */\nbody { overflow-x: hidden; } /* 兜底，先修根因 */\n.card { max-width: 100%; overflow-wrap: anywhere; }\nimg, video { max-width: 100%; }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "各断点无横向滚动",
+    "长文本正常换行"
+   ],
+   "guard": "CI Playwright 断言 scrollWidth <= innerWidth"
+  },
+  "ui-fixed-occlusion": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "固定定位遮挡内容/按钮",
+   "rootCause": "fixed 头/底栏/客服浮窗盖住正文或提交按钮，小屏尤甚。",
+   "test": "小屏滚动到底，检查底部按钮是否被浮窗遮挡（elementFromPoint）。",
+   "fix": {
+    "frontend": "/* 主内容预留安全区 */\nmain { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "关键按钮可点",
+    "浮窗可关闭"
+   ],
+   "guard": "E2E 遮挡断言"
+  },
+  "ui-zindex-war": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "z-index 层级混乱（弹窗被盖/穿透）",
+   "rootCause": "各处随手写 9999，弹窗/下拉/提示层级互相覆盖。",
+   "test": "打开弹窗+下拉+toast 组合观察层级；审计 z-index 值分布。",
+   "fix": {
+    "frontend": "/* 层级令牌化 */\n:root { --z-dropdown: 100; --z-modal: 200; --z-toast: 300; }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "组合场景层级正确",
+    "无魔法数字"
+   ],
+   "guard": "stylelint 限制 z-index 白名单"
+  },
+  "ui-modal-scroll-lock": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "弹窗背景滚动/关闭后滚动锁死",
+   "rootCause": "打开弹窗未锁 body 滚动；关闭未恢复，页面卡住不能滚。",
+   "test": "打开弹窗滚轮看背景是否动；关闭后页面能否滚动。",
+   "fix": {
+    "frontend": "// 打开锁 scroll + 关闭恢复（含 scrollbar 补偿）\ndocument.body.style.overflow = 'hidden';\n// close: document.body.style.overflow = '';",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "背景不滚",
+    "关闭恢复"
+   ],
+   "guard": "E2E 弹窗滚动用例"
+  },
+  "ui-focus-trap": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "弹窗无焦点陷阱/ESC 关闭",
+   "rootCause": "Tab 跑出弹窗到背景，键盘用户迷失；ESC 无响应。",
+   "test": "弹窗内连续 Tab 观察焦点是否循环；按 ESC。",
+   "fix": {
+    "frontend": "// 焦点陷阱 + ESC + 关闭后焦点归还触发元素\ndialog.addEventListener('keydown', trapTab);",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "焦点循环",
+    "ESC 关闭",
+    "焦点归还"
+   ],
+   "guard": "axe dialog 规则"
+  },
+  "ui-keyboard-nav": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "键盘不可达 / Tab 顺序混乱",
+   "rootCause": "div 当按钮无 tabindex/role，正 tabindex 打乱顺序。",
+   "test": "纯键盘走完核心流程；检查 tabindex>0。",
+   "fix": {
+    "frontend": "<!-- 语义元素优先 -->\n<button type=\"button\">…</button>\n<!-- 自定义组件 role+tabindex+keydown -->",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "核心流程纯键盘可完成",
+    "无正 tabindex"
+   ],
+   "guard": "axe + E2E 键盘用例"
+  },
+  "ui-focus-visible": {
+   "category": "ui",
+   "severity": "low",
+   "title": "焦点 outline 被全局移除",
+   "rootCause": "* { outline: none } 使键盘用户看不到焦点位置。",
+   "test": "Tab 切换观察焦点指示。",
+   "fix": {
+    "frontend": "/* 只去鼠标焦点，保留键盘焦点 */\n:focus:not(:focus-visible) { outline: none; }\n:focus-visible { outline: 2px solid #2563eb; }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "键盘焦点可见",
+    "鼠标点击无丑圈"
+   ],
+   "guard": "stylelint 禁止全局 outline:none"
+  },
+  "ui-loading-missing": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "无 loading 态导致重复点击/误判卡死",
+   "rootCause": "请求期间无反馈，用户连点产生重复请求或以为坏了。",
+   "test": "慢网（Slow 3G）下操作观察反馈与重复请求。",
+   "fix": {
+    "frontend": "// 请求期间按钮 loading + 禁用\nbtn.disabled = true; btn.textContent = '提交中…';",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "慢网有反馈",
+    "无重复请求"
+   ],
+   "guard": "E2E 慢网用例"
+  },
+  "ui-empty-missing": {
+   "category": "ui",
+   "severity": "low",
+   "title": "无空态展示（空白一片）",
+   "rootCause": "列表无数据时一片空白，用户不知是坏了还是没有。",
+   "test": "Mock 空数据观察页面。",
+   "fix": {
+    "frontend": "// 空态组件：插画+文案+引导动作\nif (!list.length) return <Empty action=\"去创建\" />;",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "空态有引导",
+    "加载/错误/空三态齐全"
+   ],
+   "guard": "组件库三态强制"
+  },
+  "ui-error-missing": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "无错误态/重试入口",
+   "rootCause": "请求失败静默或白屏，用户无路可走。",
+   "test": "断网/Mock 500 观察页面。",
+   "fix": {
+    "frontend": "// 错误态 + 重试\ncatch { return <ErrorView onRetry={refetch} />; }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "失败可重试",
+    "提示友好"
+   ],
+   "guard": "E2E 故障注入"
+  },
+  "ui-placeholder-label": {
+   "category": "ui",
+   "severity": "low",
+   "title": "仅 placeholder 当 label",
+   "rootCause": "输入后提示消失，用户忘记字段含义；读屏不友好。",
+   "test": "输入内容后观察是否还有字段说明。",
+   "fix": {
+    "frontend": "<!-- 可见 label 常驻 -->\n<label for=\"q\">搜索</label><input id=\"q\" placeholder=\"关键词\">",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "输入后仍知字段含义",
+    "axe 通过"
+   ],
+   "guard": "jsx-a11y label 规则"
+  },
+  "ui-disabled-no-reason": {
+   "category": "ui",
+   "severity": "low",
+   "title": "禁用按钮无原因提示",
+   "rootCause": "按钮灰着不让点，用户不知道缺什么条件。",
+   "test": "观察禁用态是否有 tooltip/文案说明。",
+   "fix": {
+    "frontend": "// 禁用原因外显\n<button disabled title=\"请先填写手机号\">提交</button>",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "禁用有解释",
+    "条件满足自动启用"
+   ],
+   "guard": "组件规范"
+  },
+  "ui-toast-stack": {
+   "category": "ui",
+   "severity": "low",
+   "title": "toast 堆叠遮挡/永不消失",
+   "rootCause": "连续操作 toast 叠满屏幕或卡住不消失，挡住操作。",
+   "test": "连续触发 10 次 toast 观察。",
+   "fix": {
+    "frontend": "// 队列上限 3 + 自动消失 + 可手动关",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "最多 3 条",
+    "按时消失"
+   ],
+   "guard": "E2E toast 用例"
+  },
+  "ui-text-overflow": {
+   "category": "ui",
+   "severity": "low",
+   "title": "长文本溢出/截断无提示",
+   "rootCause": "用户名/标题超长撑破布局或截断后无法看全。",
+   "test": "注入 200 字标题观察。",
+   "fix": {
+    "frontend": ".title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n// 配合 title 属性或展开按钮看全文",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "不破版",
+    "可看全文"
+   ],
+   "guard": "视觉回归长文本用例"
+  },
+  "ui-img-distort": {
+   "category": "ui",
+   "severity": "low",
+   "title": "图片拉伸变形",
+   "rootCause": "固定宽高不保比例，头像/商品图变形。",
+   "test": "非比例图注入观察。",
+   "fix": {
+    "frontend": "img { object-fit: cover; } /* 或 contain */",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "不变形",
+    "裁切合理"
+   ],
+   "guard": "视觉回归"
+  },
+  "ui-dark-mode": {
+   "category": "ui",
+   "severity": "low",
+   "title": "暗色模式配色错乱",
+   "rootCause": "硬编码颜色在暗色下对比度崩坏/白块刺眼。",
+   "test": "切换 prefers-color-scheme 观察。",
+   "fix": {
+    "frontend": "/* 颜色令牌化 */\n:root { --bg: #fff; --fg: #111; }\n@media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; } }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "双模式对比度达标",
+    "无硬编码漏网"
+   ],
+   "guard": "双模式视觉回归"
+  },
+  "ui-autofocus-steal": {
+   "category": "ui",
+   "severity": "low",
+   "title": "自动聚焦抢光标/移动端弹键盘",
+   "rootCause": "进页面 autofocus 搜索框，移动端键盘弹起遮半屏。",
+   "test": "移动端进页面观察键盘。",
+   "fix": {
+    "frontend": "// 仅桌面搜索页 autofocus；移动端不自动聚焦",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "移动端不弹键盘",
+    "桌面体验保留"
+   ],
+   "guard": "设备矩阵用例"
+  },
+  "ui-scroll-restore": {
+   "category": "ui",
+   "severity": "low",
+   "title": "路由切换滚动位置不恢复",
+   "rootCause": "列表→详情→返回回到顶部，用户丢失浏览位置。",
+   "test": "列表滚到中部进详情再返回观察。",
+   "fix": {
+    "frontend": "// 路由级 scroll 保存/恢复\nrouter.afterEach((to, from) => { saveScroll(from); restoreScroll(to); });",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "返回位置恢复",
+    "新页面顶部"
+   ],
+   "guard": "E2E 滚动用例"
+  },
+  "ui-back-button": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "浏览器返回破坏 SPA 状态",
+   "rootCause": "未监听 popstate，返回后 URL 与视图不一致。",
+   "test": "多步操作后连按返回观察一致性。",
+   "fix": {
+    "frontend": "// 状态入 history（pushState）+ popstate 同步",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "返回视图一致",
+    "深链可直达"
+   ],
+   "guard": "E2E 历史用例"
+  },
+  "ui-deep-link": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "SPA 深链刷新 404",
+   "rootCause": "history 模式无服务端 fallback，分享链接打开 404。",
+   "test": "直接访问子路由刷新观察。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# nginx: try_files $uri /index.html;"
+   },
+   "verify": [
+    "深链 200",
+    "静态资源不被 fallback 误伤"
+   ],
+   "guard": "CI 深链冒烟"
+  },
+  "ui-title-missing": {
+   "category": "ui",
+   "severity": "low",
+   "title": "页面无 title / 动态标题不更新",
+   "rootCause": "多标签无法区分页面，SEO 与无障碍受损。",
+   "test": "切换路由观察 document.title。",
+   "fix": {
+    "frontend": "// 路由 meta.title 统一设置",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "每页 title 唯一且达意",
+    "读屏播报正确"
+   ],
+   "guard": "E2E title 断言"
+  },
+  "ui-memory-leak": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "组件卸载未清理定时器/监听（内存泄漏）",
+   "rootCause": "setInterval/addEventListener/订阅未在卸载清理，SPA 越用越卡。",
+   "test": "反复进出页面看 Memory 快照增长；审计 useEffect 清理。",
+   "fix": {
+    "frontend": "// useEffect 返回清理\nuseEffect(() => { const t = setInterval(fn, 1000); return () => clearInterval(t); }, []);",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "反复进出内存平稳",
+    "无 detached DOM 增长"
+   ],
+   "guard": "CI 内存快照对比"
+  },
+  "ui-race-render": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "异步竞态渲染旧数据",
+   "rootCause": "快速切换条件时慢请求后到覆盖新结果，展示与条件不符。",
+   "test": "快速切换筛选/搜索观察结果是否匹配最后条件。",
+   "fix": {
+    "frontend": "// AbortController 取消旧请求或请求序号校验\nconst seq = ++ref.current; const r = await fetch(...);\nif (seq !== ref.current) return; // 丢弃过期响应",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "结果恒匹配最后条件",
+    "无闪烁"
+   ],
+   "guard": "E2E 竞态用例"
+  },
+  "ui-key-missing": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "列表 key 用 index 导致错位",
+   "rootCause": "增删/排序后 key=index 使状态串位（输入框内容跑到别行）。",
+   "test": "列表中间插入/删除观察行内状态。",
+   "fix": {
+    "frontend": "// key 用稳定 id\nrows.map(r => <Row key={r.id} />)",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "增删后状态不串",
+    "无控制台 key 警告"
+   ],
+   "guard": "ESLint react/jsx-key"
+  },
+  "ui-hydration": {
+   "category": "ui",
+   "severity": "medium",
+   "title": "SSR hydration 不匹配",
+   "rootCause": "服务端与客户端渲染不一致（时间/随机/窗口对象），React 报 hydration 错误并重渲染闪烁。",
+   "test": "Console 观察 hydration 警告；对比首屏 HTML 与客户端渲染。",
+   "fix": {
+    "frontend": "// 客户端差异内容放 useEffect 后渲染；suppress 仅用于已知无害差异",
+    "backend": "// 服务端不读 window/随机数；时间用统一快照"
+   },
+   "verify": [
+    "无 hydration 警告",
+    "首屏不闪烁"
+   ],
+   "guard": "CI SSR 一致性用例"
+  },
+  "func-timeout-missing": {
+   "category": "function",
+   "severity": "medium",
+   "title": "请求无超时一直转圈",
+   "rootCause": "fetch 默认不超时，弱网下永久 loading。",
+   "test": "模拟断网/高延迟观察是否有超时提示。",
+   "fix": {
+    "frontend": "fetch(url, { signal: AbortSignal.timeout(10_000) });",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "10s 超时提示",
+    "可重试"
+   ],
+   "guard": "请求层统一超时"
+  },
+  "func-retry-missing": {
+   "category": "function",
+   "severity": "low",
+   "title": "瞬时失败无重试",
+   "rootCause": "网络抖动一次失败即报错，体验差。",
+   "test": "注入单次 502 观察是否自动重试。",
+   "fix": {
+    "frontend": "// 幂等 GET 指数退避重试 2 次",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "瞬时失败自愈",
+    "写接口不盲目重试"
+   ],
+   "guard": "请求层重试策略"
+  },
+  "func-offline": {
+   "category": "function",
+   "severity": "medium",
+   "title": "断网无降级提示",
+   "rootCause": "离线时操作静默失败，用户不知原因。",
+   "test": "DevTools offline 操作观察。",
+   "fix": {
+    "frontend": "// online/offline 事件 + 离线横幅 + 队列待恢复重发",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "离线有提示",
+    "恢复后补发"
+   ],
+   "guard": "E2E 离线用例"
+  },
+  "func-401-loop": {
+   "category": "function",
+   "severity": "high",
+   "title": "401 跳转死循环",
+   "rootCause": "登录页本身也触发 401 跳转，或 refresh 失败反复跳登录。",
+   "test": "token 过期后观察是否循环跳转。",
+   "fix": {
+    "frontend": "// 跳转前判断当前是否已在登录页；refresh 单飞",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "无循环",
+    "过期一次到位"
+   ],
+   "guard": "E2E 过期用例"
+  },
+  "func-cors-block": {
+   "category": "function",
+   "severity": "high",
+   "title": "跨域配置错误请求被拦",
+   "rootCause": "前后端分离域名未加白名单，预检失败功能全挂。",
+   "test": "Console 观察 CORS 报错；OPTIONS 预检状态。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 白名单 + 正确预检响应（methods/headers/credentials）"
+   },
+   "verify": [
+    "预检 204",
+    "业务请求正常"
+   ],
+   "guard": "CI 跨域冒烟"
+  },
+  "func-json-parse": {
+   "category": "function",
+   "severity": "medium",
+   "title": "HTML 错误页当 JSON 解析崩溃",
+   "rootCause": "网关 502 返回 HTML，前端 r.json() 抛异常白屏。",
+   "test": "Mock 502 HTML 观察前端表现。",
+   "fix": {
+    "frontend": "// 先判 content-type 与 ok\nconst ct = r.headers.get('content-type') || '';\nif (!r.ok || !ct.includes('json')) throw new Error('服务异常');",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "HTML 响应友好报错",
+    "正常 JSON 不受影响"
+   ],
+   "guard": "请求层统一解析"
+  },
+  "func-upload-size": {
+   "category": "function",
+   "severity": "medium",
+   "title": "大文件上传无限制/无进度/不可取消",
+   "rootCause": "超大文件传半天失败重来，无进度无取消。",
+   "test": "传 500MB 文件观察。",
+   "fix": {
+    "frontend": "// 分片 + 进度 + 取消 + 断点续传；前端预检大小",
+    "backend": "// 服务端限大小与类型；分片合并校验"
+   },
+   "verify": [
+    "超限提前拒绝",
+    "进度/取消可用"
+   ],
+   "guard": "E2E 上传用例"
+  },
+  "func-download-name": {
+   "category": "function",
+   "severity": "low",
+   "title": "下载文件名乱码",
+   "rootCause": "Content-Disposition 中文未 RFC5987 编码。",
+   "test": "下载中文文件名观察。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// filename*=UTF-8''%E4%B8%AD%E6%96%87.pdf"
+   },
+   "verify": [
+    "各浏览器文件名正确",
+    "ASCII 回退存在"
+   ],
+   "guard": "CI 下载用例"
+  },
+  "func-pagination-deep": {
+   "category": "function",
+   "severity": "medium",
+   "title": "深分页越界/性能崩塌",
+   "rootCause": "page 超界返回空或全表；OFFSET 百万级慢查询。",
+   "test": "请求 page=999999 与负数观察。",
+   "fix": {
+    "frontend": "// 边界 clamp + 游标分页替代深 OFFSET",
+    "backend": "// WHERE id < $cursor ORDER BY id DESC LIMIT 20"
+   },
+   "verify": [
+    "越界友好",
+    "深页毫秒级"
+   ],
+   "guard": "CI 分页边界"
+  },
+  "func-search-empty": {
+   "category": "function",
+   "severity": "low",
+   "title": "搜索空结果无提示/无建议",
+   "rootCause": "搜不到一片空白，用户以为坏了。",
+   "test": "搜不存在词观察。",
+   "fix": {
+    "frontend": "// 空态 + 纠错建议 + 热门词",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "空态有引导",
+    "纠错可用"
+   ],
+   "guard": "E2E 搜索用例"
+  },
+  "func-filter-combine": {
+   "category": "function",
+   "severity": "medium",
+   "title": "多条件组合过滤错误",
+   "rootCause": "条件 AND/OR 组合错误、重置不干净、URL 不同步。",
+   "test": "组合 3+ 条件并重置观察结果与 URL。",
+   "fix": {
+    "frontend": "// 条件序列化进 URL；重置清全部；后端统一构建查询",
+    "backend": "// 查询构建器白名单字段，防注入"
+   },
+   "verify": [
+    "组合正确",
+    "重置干净",
+    "刷新保持"
+   ],
+   "guard": "CI 组合矩阵"
+  },
+  "func-date-picker": {
+   "category": "function",
+   "severity": "medium",
+   "title": "日期控件边界（闰年/月末/时区）",
+   "rootCause": "2 月 30 日可选、月末加一月错、跨时区差一天。",
+   "test": "选 2024-02-29、1-31 加一月、跨时区对比。",
+   "fix": {
+    "frontend": "// 用日期库（dayjs/date-fns）做加减，不手写毫秒",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "边界日期正确",
+    "时区一致"
+   ],
+   "guard": "CI 日期边界矩阵"
+  },
+  "func-copy-fail": {
+   "category": "function",
+   "severity": "low",
+   "title": "复制功能非 HTTPS 失效",
+   "rootCause": "navigator.clipboard 需安全上下文，HTTP 下静默失败。",
+   "test": "HTTP 环境点复制观察。",
+   "fix": {
+    "frontend": "// 降级 execCommand 或提示手动复制",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "HTTP 有降级",
+    "HTTPS 正常"
+   ],
+   "guard": "E2E 双协议"
+  },
+  "func-share-meta": {
+   "category": "function",
+   "severity": "low",
+   "title": "分享卡片 OG 标签缺失",
+   "rootCause": "分享到微信/Twitter 无图无标题，点击率低。",
+   "test": "分享链接到 IM 观察卡片。",
+   "fix": {
+    "frontend": "// og:title/og:image/og:description + twitter:card",
+    "backend": "// SSR 输出 meta"
+   },
+   "verify": [
+    "卡片完整",
+    "图片可达"
+   ],
+   "guard": "CI meta 断言"
+  },
+  "func-i18n-hardcode": {
+   "category": "function",
+   "severity": "low",
+   "title": "文案硬编码无法切换语言",
+   "rootCause": "字符串散落代码，国际化时漏翻/错翻。",
+   "test": "切换语言观察残留中文。",
+   "fix": {
+    "frontend": "// 文案入字典 t('key')；CI 扫描裸字符串",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "切换无残留",
+    "字典覆盖率 100%"
+   ],
+   "guard": "i18n lint"
+  },
+  "func-currency-format": {
+   "category": "function",
+   "severity": "medium",
+   "title": "货币格式化错误",
+   "rootCause": "千分位/符号/小数位错误，日元显示小数等。",
+   "test": "多币种多 locale 对比展示。",
+   "fix": {
+    "frontend": "new Intl.NumberFormat(locale, { style: 'currency', currency }).format(v);",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "各币种格式正确",
+    "与后端单位一致"
+   ],
+   "guard": "CI 格式化矩阵"
+  },
+  "func-time-format": {
+   "category": "function",
+   "severity": "medium",
+   "title": "时间显示 Invalid Date/NaN",
+   "rootCause": "后端格式变化前端 new Date 解析失败直接展示 NaN。",
+   "test": "Mock 异常时间字段观察。",
+   "fix": {
+    "frontend": "// 解析失败兜底「--」+ 上报；统一 ISO 传输",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "异常不露 NaN",
+    "正常显示正确"
+   ],
+   "guard": "CI 空值矩阵"
+  },
+  "logic-state-machine": {
+   "category": "logic",
+   "severity": "high",
+   "title": "状态机非法跳转",
+   "rootCause": "已取消订单可支付、已退款可再退，状态迁移无校验。",
+   "test": "乱序调用状态接口矩阵测试。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 显式迁移表 + 乐观锁版本号\nUPDATE orders SET status=$next, version=version+1 WHERE id=$1 AND status=$cur AND version=$v;"
+   },
+   "verify": [
+    "非法迁移 409",
+    "并发迁移不丢失"
+   ],
+   "guard": "CI 状态机矩阵"
+  },
+  "logic-idempotency": {
+   "category": "logic",
+   "severity": "high",
+   "title": "写接口无幂等（重试重复创建）",
+   "rootCause": "网络重试/双击产生重复订单/重复扣款。",
+   "test": "同一请求重放 5 次观察记录数。",
+   "fix": {
+    "frontend": "// 客户端生成 Idempotency-Key 头",
+    "backend": "// 服务端唯一索引去重，重复返回首次结果"
+   },
+   "verify": [
+    "重放只 1 条",
+    "正常创建不受影响"
+   ],
+   "guard": "CI 幂等用例"
+  },
+  "logic-cache-stale": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "缓存与 DB 不一致",
+   "rootCause": "先更缓存后更库/删除时机错，读到脏数据。",
+   "test": "写后立即读对比；并发写读观察。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 先更库后删缓存 + 延迟双删；或订阅 binlog 失效"
+   },
+   "verify": [
+    "写后读一致",
+    "并发无脏读窗口"
+   ],
+   "guard": "CI 一致性用例"
+  },
+  "logic-cache-avalanche": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "缓存穿透/击穿/雪崩",
+   "rootCause": "不存在 key 直打库；热 key 过期瞬间并发打库；大批同刻过期。",
+   "test": "压测不存在 id 与热 key 过期瞬间观察 DB QPS。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 空值缓存 + 布隆过滤；互斥重建；TTL 加随机抖动"
+   },
+   "verify": [
+    "穿透被挡",
+    "击穿单飞",
+    "雪崩错峰"
+   ],
+   "guard": "压测进 CI"
+  },
+  "logic-distributed-lock": {
+   "category": "logic",
+   "severity": "high",
+   "title": "分布式锁误用",
+   "rootCause": "锁过期业务未完、误删他人锁、非原子加锁，并发破防。",
+   "test": "模拟业务超时观察锁行为；并发抢锁测试。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// SET NX PX + value 唯一 + Lua 比对删除；或 Redlock/看门狗续期"
+   },
+   "verify": [
+    "超时不误删",
+    "并发互斥"
+   ],
+   "guard": "CI 锁用例"
+  },
+  "logic-transaction": {
+   "category": "logic",
+   "severity": "high",
+   "title": "跨服务无事务/补偿",
+   "rootCause": "扣款成功发货失败，钱货两空不一致。",
+   "test": "注入下游失败观察上游是否回滚/补偿。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 本地事务 + 事务消息/Saga 补偿；对账兜底"
+   },
+   "verify": [
+    "失败可补偿",
+    "对账平"
+   ],
+   "guard": "故障注入 CI"
+  },
+  "logic-msg-dup": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "消息丢失/重复消费",
+   "rootCause": "MQ 无确认/无去重，业务丢单或重复发券。",
+   "test": "杀消费者观察重投；重复投递观察业务。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 生产确认 + 消费幂等表 + 死信队列"
+   },
+   "verify": [
+    "不丢不重",
+    "死信可回放"
+   ],
+   "guard": "CI 消息用例"
+  },
+  "logic-permission-cache": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "权限变更后缓存未失效",
+   "rootCause": "收回权限后旧缓存仍放行，越权窗口期。",
+   "test": "改权限后立即请求观察。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 权限变更广播失效；或短 TTL + 版本号"
+   },
+   "verify": [
+    "变更秒级生效",
+    "性能可接受"
+   ],
+   "guard": "CI 权限时效用例"
+  },
+  "logic-soft-delete": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "软删除数据仍被查询/统计",
+   "rootCause": "deleted_at 过滤遗漏，报表含已删数据、唯一约束冲突。",
+   "test": "删除后查列表/报表/唯一性观察。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// ORM 全局 scope 过滤 deleted_at；唯一索引含 deleted_at"
+   },
+   "verify": [
+    "各查询不含已删",
+    "可重建同名"
+   ],
+   "guard": "CI 软删矩阵"
+  },
+  "logic-unique-race": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "唯一性靠代码检查并发破防",
+   "rootCause": "先查后插并发产生重复账号/重复单号。",
+   "test": "并发注册同名观察。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 数据库唯一约束兜底，捕获冲突转友好提示"
+   },
+   "verify": [
+    "并发无重复",
+    "冲突提示友好"
+   ],
+   "guard": "CI 并发唯一用例"
+  },
+  "logic-falsy-check": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "falsy 误判（0/\"\" 被当空）",
+   "rootCause": "if (!value) 把 0、\"\"、false 当缺失，数量 0 变默认值。",
+   "test": "边界值 0/\"\"/false 走查分支。",
+   "fix": {
+    "frontend": "// 判空用 == null 或显式类型检查\nif (value == null) { /* 仅 null/undefined */ }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "0 值保留",
+    "空值兜底"
+   ],
+   "guard": "ESLint eqeqeq 例外规范 + 边界用例"
+  },
+  "logic-string-compare": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "字符串比较日期/版本号",
+   "rootCause": "\"10\" < \"9\"、日期字符串格式不一导致排序/比较错误。",
+   "test": "版本 1.10 vs 1.9、日期多格式对比。",
+   "fix": {
+    "frontend": "// 版本用 semver 比较；日期用时间戳\nsemver.gt('1.10.0', '1.9.0'); // true",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "比较正确",
+    "格式统一"
+   ],
+   "guard": "CI 比较用例"
+  },
+  "logic-switch-fallthrough": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "switch 缺 break / 复制粘贴分支",
+   "rootCause": "fallthrough 串分支；if/else 两支代码相同（复制忘改）。",
+   "test": "走查每个分支输出；ESLint no-fallthrough。",
+   "fix": {
+    "frontend": "// 每分支 break/return；或改映射表",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "分支互不串",
+    "无重复分支"
+   ],
+   "guard": "ESLint no-fallthrough + 评审"
+  },
+  "logic-async-loop": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "forEach async 不等待 / 遍历改数组",
+   "rootCause": "forEach 里 await 不串行，后续逻辑提前执行；遍历时 splice 跳元素。",
+   "test": "走查异步循环与遍历修改点。",
+   "fix": {
+    "frontend": "// for...of + await；或 Promise.all 显式并发\nfor (const item of items) await handle(item);",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "顺序正确",
+    "无跳元素"
+   ],
+   "guard": "ESLint no-await-in-loop 按需 + 评审"
+  },
+  "logic-promise-swallow": {
+   "category": "logic",
+   "severity": "medium",
+   "title": "catch 吞错误静默失败",
+   "rootCause": "catch {} 空处理，失败无日志无提示，问题隐身。",
+   "test": "搜空 catch；注入失败观察是否有任何反馈。",
+   "fix": {
+    "frontend": "// catch 至少日志+上报+用户提示\ncatch (e) { report(e); toast('操作失败'); }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "失败可见",
+    "日志可查"
+   ],
+   "guard": "ESLint no-empty"
+  },
+  "data-encoding": {
+   "category": "data",
+   "severity": "medium",
+   "title": "乱码（UTF8/GBK 混用）",
+   "rootCause": "库/连接/页面字符集不一致，中文变 ??? 或 锟斤拷。",
+   "test": "写入中文读出对比；检查连接串与 meta charset。",
+   "fix": {
+    "frontend": "// 全链路 UTF-8：meta/响应头/连接串 characterEncoding=utf8",
+    "backend": "// MySQL utf8mb4；导出 BOM 按需"
+   },
+   "verify": [
+    "中文往返一致",
+    "emoji 正常"
+   ],
+   "guard": "CI 字符集断言"
+  },
+  "data-truncation": {
+   "category": "data",
+   "severity": "medium",
+   "title": "字段长度截断（emoji/中文）",
+   "rootCause": "varchar 按字节算，emoji 4 字节被截断或报错。",
+   "test": "提交 emoji/长中文观察存储与展示。",
+   "fix": {
+    "frontend": "// 前端按码点计数提示；后端 utf8mb4 + 合理长度",
+    "backend": "// 校验失败 400 而非静默截断"
+   },
+   "verify": [
+    "不静默截断",
+    "超限有提示"
+   ],
+   "guard": "CI 边界长度用例"
+  },
+  "data-null-semantics": {
+   "category": "data",
+   "severity": "medium",
+   "title": "null/\"\"/undefined 语义混乱",
+   "rootCause": "三态混用导致查询条件、展示、统计口径不一致。",
+   "test": "走查字段三态在各层的表现。",
+   "fix": {
+    "frontend": "// 契约明确：缺失=null，空串=用户清空；schema 统一",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "三态行为一致",
+    "统计口径明确"
+   ],
+   "guard": "接口契约测试"
+  },
+  "data-duplicate": {
+   "category": "data",
+   "severity": "medium",
+   "title": "数据重复无去重",
+   "rootCause": "导入/同步无幂等键，重复行污染统计。",
+   "test": "重复导入同文件观察行数。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 业务唯一键 + upsert；导入批次去重"
+   },
+   "verify": [
+    "重复导入不增行",
+    "正常更新生效"
+   ],
+   "guard": "CI 导入幂等"
+  },
+  "data-orphan": {
+   "category": "data",
+   "severity": "medium",
+   "title": "孤儿数据（外键缺失）",
+   "rootCause": "删主表不删子表，列表 join 丢行或报错。",
+   "test": "删主记录后查子表与页面。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 外键级联或事务内同删；定期孤儿巡检"
+   },
+   "verify": [
+    "无孤儿",
+    "删除事务原子"
+   ],
+   "guard": "CI 孤儿巡检"
+  },
+  "data-migration": {
+   "category": "data",
+   "severity": "high",
+   "title": "迁移丢数据/不可回滚",
+   "rootCause": "DDL 无备份无回滚脚本，失败即事故。",
+   "test": "演练迁移+回滚；对比迁移前后行数/校验和。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 迁移前快照；双写灰度；回滚脚本必备；expand-contract 模式"
+   },
+   "verify": [
+    "回滚演练通过",
+    "校验和一致"
+   ],
+   "guard": "CI 迁移演练"
+  },
+  "data-backup": {
+   "category": "data",
+   "severity": "high",
+   "title": "无备份/备份不可恢复",
+   "rootCause": "有备份文件但从没恢复演练，真坏时发现备份是空的。",
+   "test": "抽查备份恢复演练。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 自动备份 + 异地 + 定期恢复演练 + 告警"
+   },
+   "verify": [
+    "恢复演练成功",
+    "RPO 达标"
+   ],
+   "guard": "备份监控"
+  },
+  "data-pii-plain": {
+   "category": "data",
+   "severity": "high",
+   "title": "个人敏感信息明文存储/展示未脱敏",
+   "rootCause": "手机号/身份证明文存库、页面全量展示，泄露即事故。",
+   "test": "查库与页面展示是否脱敏。",
+   "fix": {
+    "frontend": "// 展示掩码 138****1234",
+    "backend": "// 存储加密（KMS）；日志脱敏；最小权限查询"
+   },
+   "verify": [
+    "展示脱敏",
+    "存储加密"
+   ],
+   "guard": "CI 脱敏断言"
+  },
+  "data-pii-export": {
+   "category": "data",
+   "severity": "high",
+   "title": "导出未脱敏/无审计",
+   "rootCause": "批量导出含全量个人信息，无水印无审计，内鬼外带。",
+   "test": "导出文件检查字段与审计记录。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 导出脱敏 + 审批 + 水印 + 审计日志"
+   },
+   "verify": [
+    "导出脱敏",
+    "审计可查"
+   ],
+   "guard": "导出权限收敛"
+  },
+  "data-bigint-precision": {
+   "category": "data",
+   "severity": "high",
+   "title": "大整数精度丢失（>2^53）",
+   "rootCause": "雪花 id 经 JSON number 传前端末位变 0，查无此单。",
+   "test": "对比后端 id 与前端接收值。",
+   "fix": {
+    "frontend": "// id 一律字符串传输",
+    "backend": "// JSON 序列化 long→string；或 JSONbig"
+   },
+   "verify": [
+    "id 往返一致",
+    "查询命中"
+   ],
+   "guard": "CI 精度用例"
+  },
+  "data-schema-drift": {
+   "category": "data",
+   "severity": "medium",
+   "title": "接口字段类型漂移",
+   "rootCause": "后端把 number 改 string/数组改对象，前端静默出错。",
+   "test": "契约测试对比 schema 版本。",
+   "fix": {
+    "frontend": "// 前端 schema 校验兜底",
+    "backend": "// 契约先行 +  breaking change 评审"
+   },
+   "verify": [
+    "漂移被 CI 拦截",
+    "兼容期明确"
+   ],
+   "guard": "契约测试进 CI"
+  },
+  "data-locale-sort": {
+   "category": "data",
+   "severity": "low",
+   "title": "中文排序错误（缺 localeCompare）",
+   "rootCause": "默认按码点排，中文顺序不符合拼音习惯。",
+   "test": "中文列表排序观察。",
+   "fix": {
+    "frontend": "rows.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));",
+    "backend": "// SQL: ORDER BY CONVERT(name USING gbk) 或 collation"
+   },
+   "verify": [
+    "拼音序正确",
+    "多音字策略明确"
+   ],
+   "guard": "CI 排序用例"
+  },
+  "data-case-whitespace": {
+   "category": "data",
+   "severity": "medium",
+   "title": "大小写/首尾空格导致重复与匹配失败",
+   "rootCause": "User@x.com 与 user@x.com 两个账号；\" abc \" 搜不到。",
+   "test": "大小写/空格变体注册与搜索。",
+   "fix": {
+    "frontend": "// 入口 trim + 邮箱 lowercase",
+    "backend": "// 唯一索引用规范化列；搜索 normalize"
+   },
+   "verify": [
+    "变体归一",
+    "搜索命中"
+   ],
+   "guard": "CI 规范化用例"
+  },
+  "algo-complexity": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "O(n²) 嵌套循环卡顿",
+   "rootCause": "列表内 find/includes 嵌套，万级数据主线程卡死。",
+   "test": "大数据量 profile 观察长任务。",
+   "fix": {
+    "frontend": "// Map/Set 索引化 O(n)\nconst byId = new Map(rows.map(r => [r.id, r]));",
+    "backend": "// SQL  join 替代循环查询"
+   },
+   "verify": [
+    "万级毫秒级",
+    "无长任务"
+   ],
+   "guard": "CI 性能基准"
+  },
+  "algo-recursion-depth": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "递归爆栈",
+   "rootCause": "深树/深链递归超调用栈，RangeError 崩溃。",
+   "test": "构造 1 万层深度测试。",
+   "fix": {
+    "frontend": "// 改迭代 + 显式栈",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "深层不崩",
+    "结果一致"
+   ],
+   "guard": "CI 深度用例"
+  },
+  "algo-binary-search": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "二分边界死循环/漏解",
+   "rootCause": "mid 取整与 lo/hi 更新不配套，死循环或漏边界。",
+   "test": "属性测试：任意有序数组与目标对比线性查找。",
+   "fix": {
+    "frontend": "// 统一左闭右开模板\nwhile (lo < hi) { const mid = (lo + hi) >> 1; if (a[mid] < t) lo = mid + 1; else hi = mid; }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "属性测试全过",
+    "边界命中"
+   ],
+   "guard": "fast-check 进 CI"
+  },
+  "algo-dedup-ref": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "Set/Map 对象去重失效",
+   "rootCause": "引用不同内容相同的对象去重不掉。",
+   "test": "重复内容对象数组去重观察。",
+   "fix": {
+    "frontend": "// 按业务键去重\nconst seen = new Set(); rows.filter(r => !seen.has(r.id) && seen.add(r.id));",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "内容重复被去",
+    "顺序保持"
+   ],
+   "guard": "CI 去重用例"
+  },
+  "algo-shuffle": {
+   "category": "algorithm",
+   "severity": "low",
+   "title": "洗牌不均匀（sort random）",
+   "rootCause": "sort(() => Math.random()-0.5) 分布偏置，抽奖不公。",
+   "test": "百万次统计位置分布。",
+   "fix": {
+    "frontend": "// Fisher-Yates\nfor (let i = a.length - 1; i > 0; i--) { const j = crypto.randomInt(i + 1); [a[i], a[j]] = [a[j], a[i]]; }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "分布均匀",
+    "安全场景用 crypto"
+   ],
+   "guard": "CI 分布检验"
+  },
+  "algo-hash-collision": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "哈希冲突未处理",
+   "rootCause": "自研哈希/取模分桶冲突覆盖，数据丢失。",
+   "test": "构造冲突键观察。",
+   "fix": {
+    "frontend": "// 用成熟哈希；冲突链/开放寻址；分桶用一致性哈希",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "冲突不丢数据",
+    "分布均匀"
+   ],
+   "guard": "CI 冲突用例"
+  },
+  "algo-debounce-this": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "防抖节流丢 this/参数/立即执行语义",
+   "rootCause": "自研 debounce 丢上下文，回调 this 错、参数丢。",
+   "test": "走查实现与调用点。",
+   "fix": {
+    "frontend": "// 用 lodash.debounce 或正确保存 this/args\nfunction debounce(fn, ms) { let t; return function (...a) { clearTimeout(t); t = setTimeout(() => fn.apply(this, a), ms); }; }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "this/参数正确",
+    "语义符合预期"
+   ],
+   "guard": "CI 单测"
+  },
+  "algo-cursor-pagination": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "游标分页漏数据/重复",
+   "rootCause": "游标字段不唯一或排序不稳，翻页漏行重行。",
+   "test": "翻页期间插入数据观察完整性。",
+   "fix": {
+    "frontend": "// 游标用 (sort_key, id) 复合 + 稳定排序",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "并发写入不漏不重",
+    "全量拼接一致"
+   ],
+   "guard": "属性测试进 CI"
+  },
+  "algo-rate-window": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "限流窗口边界突发",
+   "rootCause": "固定窗口临界 2 倍突发打垮下游。",
+   "test": "窗口边界压测观察峰值。",
+   "fix": {
+    "frontend": "// 滑动窗口/令牌桶",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "边界峰值受控",
+    "正常流量无感"
+   ],
+   "guard": "压测进 CI"
+  },
+  "algo-div-zero": {
+   "category": "algorithm",
+   "severity": "medium",
+   "title": "归一化/百分比除零",
+   "rootCause": "总量 0 时除零得 NaN/Infinity 污染展示与排序。",
+   "test": "空数据走查计算链。",
+   "fix": {
+    "frontend": "const pct = total ? part / total : 0;",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "空数据不 NaN",
+    "展示兜底"
+   ],
+   "guard": "CI 空值矩阵"
+  },
+  "perf-cls": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "布局偏移 CLS 过高",
+   "rootCause": "图片/广告/字体无占位，加载时页面跳动误触。",
+   "test": "Lighthouse/Performance 面板看 CLS 与偏移源。",
+   "fix": {
+    "frontend": "<!-- 图片带宽高或 aspect-ratio；广告位固定高 -->\n<img src=\"x.jpg\" width=\"800\" height=\"600\">",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "CLS < 0.1",
+    "无意外跳动"
+   ],
+   "guard": "CI Lighthouse 门禁"
+  },
+  "perf-lcp": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "首屏 LCP 过大",
+   "rootCause": "首屏大图未压缩/未 preload，LCP > 2.5s。",
+   "test": "Lighthouse 看 LCP 元素与耗时。",
+   "fix": {
+    "frontend": "<!-- 首屏图 preload + 现代格式 + 尺寸自适应 -->\n<link rel=\"preload\" as=\"image\" href=\"hero.webp\">",
+    "backend": "// CDN + 压缩 + 缓存"
+   },
+   "verify": [
+    "LCP < 2.5s",
+    "弱网达标"
+   ],
+   "guard": "CI 性能预算"
+  },
+  "perf-inp": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "长任务阻塞交互（INP 差）",
+   "rootCause": "主线程长任务 > 50ms，点击卡顿。",
+   "test": "Performance 录制定位长任务。",
+   "fix": {
+    "frontend": "// 分片（scheduler.yield / requestIdleCallback）+ Web Worker",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "INP < 200ms",
+    "无 > 50ms 长任务"
+   ],
+   "guard": "CI 长任务断言"
+  },
+  "perf-bundle": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "包体过大无代码分割",
+   "rootCause": "首屏加载全量 bundle 数 MB，弱网白屏久。",
+   "test": "构建分析看 chunk 大小。",
+   "fix": {
+    "frontend": "// 路由级懒加载 +  tree-shaking + 按需引入\nconst Page = lazy(() => import('./Page'));",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "首屏 JS < 200KB gzip",
+    "按需加载生效"
+   ],
+   "guard": "CI bundle 预算"
+  },
+  "perf-img": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "图片未压缩/未懒加载/未用现代格式",
+   "rootCause": "几 MB 原图直出，流量与 LCP 双输。",
+   "test": "Network 看图片体积与格式。",
+   "fix": {
+    "frontend": "<!-- loading=\"lazy\" + srcset + webp/avif -->\n<img loading=\"lazy\" srcset=\"a-400.webp 400w, a-800.webp 800w\">",
+    "backend": "// CDN 图片处理参数"
+   },
+   "verify": [
+    "体积降 70%+",
+    "懒加载生效"
+   ],
+   "guard": "CI 资源预算"
+  },
+  "perf-font": {
+   "category": "performance",
+   "severity": "low",
+   "title": "字体阻塞渲染/闪烁",
+   "rootCause": "字体文件大且无 font-display，首屏空白或 FOUT。",
+   "test": "Network 看字体加载与文本可见时机。",
+   "fix": {
+    "frontend": "/* font-display: swap + 子集化 + preload 关键字重 */",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "文本先可见",
+    "字体后替换"
+   ],
+   "guard": "CI 字体预算"
+  },
+  "perf-n-plus-1": {
+   "category": "performance",
+   "severity": "high",
+   "title": "N+1 查询",
+   "rootCause": "列表循环内逐条查关联，百行千次 SQL。",
+   "test": "SQL 日志计数；profile 接口耗时。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// join / IN 批量 / DataLoader 聚合"
+   },
+   "verify": [
+    "查询数 O(1)",
+    "耗时达标"
+   ],
+   "guard": "CI 查询计数断言"
+  },
+  "perf-no-index": {
+   "category": "performance",
+   "severity": "high",
+   "title": "慢查询缺索引",
+   "rootCause": "全表扫描随数据量线性恶化。",
+   "test": "EXPLAIN 看 type=ALL 与 rows。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 按查询模式建复合索引；覆盖索引优先"
+   },
+   "verify": [
+    "EXPLAIN 走索引",
+    "P99 达标"
+   ],
+   "guard": "慢查询告警"
+  },
+  "perf-no-pagination": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "全量拉取无分页",
+   "rootCause": "一次拉全表，内存与带宽爆炸。",
+   "test": "观察接口返回量与耗时。",
+   "fix": {
+    "frontend": "// 默认分页 + 上限",
+    "backend": "// LIMIT 强制 + 游标"
+   },
+   "verify": [
+    "返回有上限",
+    "深页快"
+   ],
+   "guard": "CI 上限断言"
+  },
+  "perf-no-cdn": {
+   "category": "performance",
+   "severity": "low",
+   "title": "静态资源无 CDN/长缓存",
+   "rootCause": "每次回源且无缓存头，重复下载。",
+   "test": "看响应 cache-control 与命中头。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 指纹文件名 + immutable 长缓存 + CDN"
+   },
+   "verify": [
+    "命中率 > 90%",
+    "重复访问 304/内存缓存"
+   ],
+   "guard": "CI 缓存头断言"
+  },
+  "perf-third-party": {
+   "category": "performance",
+   "severity": "medium",
+   "title": "第三方脚本拖慢首屏",
+   "rootCause": "统计/客服同步脚本阻塞解析，挂掉连带主站。",
+   "test": "Coverage 看第三方耗时；断第三方观察主站。",
+   "fix": {
+    "frontend": "<!-- async/defer + 延迟加载 + 故障隔离 -->\n<script src=\"https://analytics.example/a.js\" defer></script>",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "第三方不阻塞",
+    "挂掉主站正常"
+   ],
+   "guard": "CI 故障注入"
+  },
+  "a11y-aria-misuse": {
+   "category": "a11y",
+   "severity": "medium",
+   "title": "ARIA 属性误用",
+   "rootCause": "role/aria-* 与语义冲突（button 加 role=link），读屏播报错乱。",
+   "test": "axe 审计 aria 规则；读屏实测。",
+   "fix": {
+    "frontend": "<!-- 语义元素优先，ARIA 只补不足 -->",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "axe 0 违规",
+    "读屏播报正确"
+   ],
+   "guard": "CI axe 门禁"
+  },
+  "a11y-heading-order": {
+   "category": "a11y",
+   "severity": "low",
+   "title": "标题层级跳跃",
+   "rootCause": "h1→h3 跳级，读屏导航结构混乱。",
+   "test": "axe heading-order；走查大纲。",
+   "fix": {
+    "frontend": "<!-- 层级连续，视觉大小用 CSS 控制 -->",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "大纲连续",
+    "视觉不变"
+   ],
+   "guard": "CI axe"
+  },
+  "a11y-live-region": {
+   "category": "a11y",
+   "severity": "medium",
+   "title": "动态内容无 aria-live 通知",
+   "rootCause": "toast/异步结果读屏用户感知不到。",
+   "test": "读屏下触发异步更新观察播报。",
+   "fix": {
+    "frontend": "<div aria-live=\"polite\" id=\"status\"></div>",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "更新被播报",
+    "不刷屏"
+   ],
+   "guard": "CI axe + 读屏抽测"
+  },
+  "a11y-motion": {
+   "category": "a11y",
+   "severity": "low",
+   "title": "动画无 prefers-reduced-motion",
+   "rootCause": "强动画诱发眩晕/癫痫风险。",
+   "test": "开启减少动态效果观察。",
+   "fix": {
+    "frontend": "@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "减少模式静止",
+    "正常模式保留"
+   ],
+   "guard": "CI 双模式"
+  },
+  "a11y-video-caption": {
+   "category": "a11y",
+   "severity": "low",
+   "title": "视频无字幕/音频无转录",
+   "rootCause": "听障用户无法获取内容。",
+   "test": "检查 track/字幕开关。",
+   "fix": {
+    "frontend": "<video><track kind=\"captions\" src=\"zh.vtt\" srclang=\"zh\" label=\"中文\"></video>",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "字幕可用",
+    "转录可查"
+   ],
+   "guard": "内容规范"
+  },
+  "a11y-skip-link": {
+   "category": "a11y",
+   "severity": "low",
+   "title": "缺跳转主内容链接",
+   "rootCause": "键盘用户每页 Tab 过全部导航。",
+   "test": "Tab 首下观察是否有 skip link。",
+   "fix": {
+    "frontend": "<a class=\"skip\" href=\"#main\">跳到主内容</a>",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "首 Tab 可见可用",
+    "焦点落主区"
+   ],
+   "guard": "CI axe"
+  },
+  "a11y-gesture-alt": {
+   "category": "a11y",
+   "severity": "medium",
+   "title": "仅手势操作无替代",
+   "rootCause": "滑动/捏合唯一操作路径，运动障碍用户无法完成。",
+   "test": "走查手势功能是否有按钮替代。",
+   "fix": {
+    "frontend": "// 手势功能提供等价按钮",
+    "backend": "// 无需前端改动。"
+   },
+   "verify": [
+    "替代路径可用",
+    "功能等价"
+   ],
+   "guard": "WCAG 2.5.1 抽测"
+  },
+  "sec-idor-export": {
+   "category": "security",
+   "severity": "critical",
+   "title": "导出/批量接口越权（整表拖取他人数据）",
+   "rootCause": "导出/列表/批量查询接口只校验登录不校验数据归属，改 userId/orgId/分页即可拖走全量他人数据。",
+   "test": "抓导出/列表请求，把 userId/orgId/tenantId 换成他人或删掉；把 pageSize 改 100000、page 遍历；对比返回是否含他人记录。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 导出/列表强制注入当前主体过滤，禁止信任客户端归属参数\nconst where = { ownerId: req.user.id };           // 服务端取会话主体\nif (req.user.role !== 'admin') delete req.query.orgId;\nconst rows = await db.export.findMany({ where, take: Math.min(+req.query.pageSize || 20, 200) });"
+   },
+   "verify": [
+    "换他人 id 导出返回 403/空",
+    "pageSize 超限被截断",
+    "遍历分页无他人数据"
+   ],
+   "guard": "CI 越权导出用例；导出接口统一走归属过滤中间件"
+  },
+  "sec-idor-file": {
+   "category": "security",
+   "severity": "high",
+   "title": "附件/私密文件对象越权（他人文件可下载）",
+   "rootCause": "下载/预览接口用 fileId/path 直接取文件，不校验文件归属，遍历 id 或猜路径可拿他人合同/身份证/发票。",
+   "test": "下载自己附件抓包，fileId 递增/递减或换 UUID；试 /files/1001→1002；直连存储 URL 看是否带签名与过期。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 取文件前校验归属；存储用带过期签名 URL\nconst f = await db.file.findUnique({ where: { id } });\nif (!f || f.ownerId !== req.user.id) return res.sendStatus(403);\nres.redirect(storage.signedUrl(f.key, { expiresIn: 60 }));"
+   },
+   "verify": [
+    "他人 fileId 返回 403",
+    "直链无签名不可访问",
+    "签名 URL 过期失效"
+   ],
+   "guard": "文件接口归属校验进 CI；存储桶禁止 public-read"
+  },
+  "sec-idor-write": {
+   "category": "security",
+   "severity": "critical",
+   "title": "写操作越权（可改/删他人资源）",
+   "rootCause": "PUT/PATCH/DELETE 只校验登录不校验归属，改路径 id 即可修改/删除他人订单、地址、文章。",
+   "test": "对自己资源发 PUT/DELETE 抓包，把 id 换他人；观察是否 200；再 GET 确认他人资源被改/删。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 写操作先取资源校验归属再执行\nconst r = await db.order.findUnique({ where: { id } });\nif (!r || r.userId !== req.user.id) return res.sendStatus(403);\nawait db.order.update({ where: { id }, data });"
+   },
+   "verify": [
+    "改/删他人 id 返回 403",
+    "他人资源未被变更"
+   ],
+   "guard": "CI 写越权用例；ORM 层统一 scope 归属"
+  },
+  "sec-tenant-cross": {
+   "category": "security",
+   "severity": "critical",
+   "title": "多租户/组织隔离失效（跨租户读写）",
+   "rootCause": "SaaS 按 tenantId/orgId 隔离但查询漏加租户条件，或租户 id 来自客户端可改，导致 A 公司看到 B 公司数据。",
+   "test": "切换两个租户账号抓包，把 header/cookie/query 里的 tenantId 互换；检查列表/详情/导出是否串数据。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 租户 id 只从会话/子域解析，所有查询强制租户 scope\nconst tenant = req.session.tenantId;             // 不读客户端\ndb.addTenantScope(tenant);                        // 全局 where tenantId=tenant"
+   },
+   "verify": [
+    "互换 tenantId 返回 403/本租户数据",
+    "跨租户查询为空"
+   ],
+   "guard": "CI 双租户隔离用例；ORM 全局租户 scope + 评审清单"
+  },
+  "sec-func-level": {
+   "category": "security",
+   "severity": "high",
+   "title": "功能级越权：前端隐藏按钮但接口可达",
+   "rootCause": "仅靠前端 v-if/hidden 隐藏管理按钮，后端接口未鉴权，普通用户直接调接口即可用管理功能。",
+   "test": "用普通账号登录，从 admin 包/路由表/JS 里找管理接口路径，直接 curl 带普通 token 调用看是否 200。",
+   "fix": {
+    "frontend": "// 前端隐藏仅作体验，不作安全边界",
+    "backend": "// 每个管理接口独立鉴权中间件，不依赖前端\nrouter.delete('/users/:id', requireRole('admin'), handler);"
+   },
+   "verify": [
+    "普通 token 调管理接口 403",
+    "前端隐藏与后端鉴权一致"
+   ],
+   "guard": "CI 遍历路由表校验每个写/管理接口都有鉴权中间件"
+  },
+  "sec-graphql-node": {
+   "category": "security",
+   "severity": "high",
+   "title": "GraphQL 全局节点 ID 越权遍历",
+   "rootCause": "GraphQL node(id)/全局 Relay ID 可解码遍历，resolver 不校验归属即可读他人对象。",
+   "test": "introspection 找 node 字段；base64 解码全局 ID 改类型/序号重查；对比是否返回他人数据。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// resolver 内校验归属，禁止仅靠 ID 可猜\nconst obj = await load(type, id);\nif (!canRead(req.user, obj)) throw new ForbiddenError();"
+   },
+   "verify": [
+    "遍历 node ID 返回授权错误",
+    "他人对象不可读"
+   ],
+   "guard": "GraphQL resolver 统一授权层 + CI 越权用例"
+  },
+  "sec-param-tamper": {
+   "category": "security",
+   "severity": "high",
+   "title": "请求参数篡改（隐藏域/只读字段可改）",
+   "rootCause": "服务端信任客户端提交的隐藏域/只读字段（userId、role、status、price），改包即可提权/改状态/改价。",
+   "test": "抓正常请求，追加/修改隐藏字段 role=admin、status=paid、userId=他人、price=0.01 重发观察是否生效。",
+   "fix": {
+    "frontend": "// 前端只读/隐藏仅作展示",
+    "backend": "// 服务端白名单取字段，敏感字段一律服务端推导\nconst data = pick(req.body, ['name', 'avatar']);   // 不含 role/status/price\ndata.userId = req.user.id;"
+   },
+   "verify": [
+    "篡改敏感字段被忽略/400",
+    "状态/价格/归属不被客户端改变"
+   ],
+   "guard": "CI 参数篡改用例；DTO 白名单 + 禁止全量 assign"
+  },
+  "sec-response-trust": {
+   "category": "security",
+   "severity": "high",
+   "title": "客户端信任响应/前端校验可绕过",
+   "rootCause": "关键校验（金额、权限、库存）只在前端做或信任前端回传结果，改响应/直接调接口即绕过。",
+   "test": "用代理改响应（isAdmin=true、balance=99999）看前端是否放行；跳过前端直接调写接口验证服务端是否复核。",
+   "fix": {
+    "frontend": "// 前端校验仅作体验提示",
+    "backend": "// 所有安全/资损校验服务端复核，不信任客户端结论\nif (!serverCheckBalance(uid, amount)) return res.status(400).end();"
+   },
+   "verify": [
+    "改响应后服务端仍拒绝",
+    "直调接口校验生效"
+   ],
+   "guard": "评审清单：安全/资损校验必须在服务端；CI 绕过用例"
+  },
+  "sec-cookie-plain": {
+   "category": "security",
+   "severity": "high",
+   "title": "Cookie 明文角色/userId 可篡改",
+   "rootCause": "会话外把 role/userId/isAdmin 明文放 Cookie 且无签名，改 Cookie 即提权/换身份。",
+   "test": "查看 Cookie 是否含 role/userId 明文；base64/直接改值重发看是否生效；检查有无签名/HMAC。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 身份只放服务端会话或签名 token；Cookie 仅 opaque sessionId\nres.cookie('sid', sessionId, { httpOnly: true, secure: true, sameSite: 'lax' });\n// 如需客户端状态必须 HMAC 签名并服务端验签"
+   },
+   "verify": [
+    "改 Cookie 角色不生效",
+    "无签名状态被拒绝"
+   ],
+   "guard": "CI Cookie 篡改用例；禁止明文身份 Cookie"
+  },
+  "sec-jwt-kid": {
+   "category": "security",
+   "severity": "critical",
+   "title": "JWT kid/jku 注入伪造签名",
+   "rootCause": "验签时按 header.kid 拼路径/SQL 或按 jku 远程取钥，可注入 kid 指向可控文件/空钥、jku 指向攻击者 JWKS 伪造 token。",
+   "test": "解码 JWT 改 header.kid 为 ../../dev/null 或 SQL 注入串、jku 为自己服务器 JWKS，用对应私钥签 token 重放看是否通过。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// kid 白名单映射固定密钥，禁止拼路径/SQL；jku 禁止或域名白名单\nconst key = KEYS[header.kid];                    // 预置映射\nif (!key) throw new Error('bad kid');\njwt.verify(token, key, { algorithms: ['RS256'] });"
+   },
+   "verify": [
+    "注入 kid/jku 验签失败",
+    "仅白名单密钥可用"
+   ],
+   "guard": "CI JWT kid/jku 注入用例；锁定 algorithms"
+  },
+  "sec-hidden-state": {
+   "category": "security",
+   "severity": "high",
+   "title": "隐藏表单域承载敏感状态可篡改",
+   "rootCause": "多步表单把上一步结果（价格、资格、审核态）放 hidden 域传递，下一步直接信任，可改 hidden 跳步/改价。",
+   "test": "查看多步表单 hidden 字段；改 hidden 的 price/qualified/step 提交下一步看是否被信任。",
+   "fix": {
+    "frontend": "<!-- hidden 仅传非敏感 CSRF/flow id -->",
+    "backend": "// 敏感状态存服务端 session/DB，按 flowId 取，不读 hidden\nconst state = await flowStore.get(req.body.flowId, req.user.id);"
+   },
+   "verify": [
+    "改 hidden 敏感值不生效",
+    "状态以服务端为准"
+   ],
+   "guard": "CI 多步篡改用例；敏感状态服务端存储"
+  },
+  "sec-replay": {
+   "category": "security",
+   "severity": "high",
+   "title": "请求重放（无 nonce/时间戳/幂等键）",
+   "rootCause": "写/支付/领券请求无 nonce+时间戳+幂等键，抓包重放可重复领券/重复扣款/重复提交。",
+   "test": "抓一次成功写请求原样重发多次，观察是否重复生效（余额/券/订单数变化）。",
+   "fix": {
+    "frontend": "// 客户端带 Idempotency-Key",
+    "backend": "// 服务端 nonce+时间窗+幂等键去重\nif (await seen(nonce)) return res.status(409).end();\nawait mark(nonce, ttl = 300);"
+   },
+   "verify": [
+    "重放返回 409/不重复生效",
+    "超时间窗拒绝"
+   ],
+   "guard": "CI 重放用例；写接口统一幂等中间件"
+  },
+  "sec-price-client-calc": {
+   "category": "security",
+   "severity": "critical",
+   "title": "折扣/运费/总价客户端计算可篡改",
+   "rootCause": "总价=单价*数量-折扣+运费 在前端算好提交，服务端不复核，改 total/discount/freight 即低价下单。",
+   "test": "下单抓包改 total=0.01、discount=999、freight=-100 重发；观察订单实付是否被改。",
+   "fix": {
+    "frontend": "// 前端展示价仅作预览",
+    "backend": "// 服务端按商品+券+运费规则重算实付，与提交值比对\nconst expect = pricing.compute(items, coupon, addr);\nif (Math.abs(expect - req.body.total) > 0.001) return res.status(400).end();"
+   },
+   "verify": [
+    "改 total 被拒/按服务端价成交",
+    "负运费/超折扣被拒"
+   ],
+   "guard": "CI 价格篡改用例；定价单一服务端来源"
+  },
+  "sec-sqli-comment-trunc": {
+   "category": "security",
+   "severity": "critical",
+   "title": "SQL 注释截断（-- / # 绕过后续条件）",
+   "rootCause": "登录/查询拼接 SQL 时，输入 admin'-- 或 admin'# 把后续密码/权限条件注释掉，直接绕过。",
+   "test": "登录处输入 admin'-- 、admin'# 、' OR 1=1-- 观察是否免密登录；查询处加 -- 看是否去掉过滤条件。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 参数化后注释符只是普通字符，无法截断\nconst u = await db.query('SELECT * FROM users WHERE name=$1 AND pwd_hash=$2', [name, hash]);"
+   },
+   "verify": [
+    "注释 payload 登录失败",
+    "无免密绕过"
+   ],
+   "guard": "CI 注释绕过用例；sqlmap --tamper=space2comment 回归"
+  },
+  "sec-sqli-inline-waf": {
+   "category": "security",
+   "severity": "high",
+   "title": "内联注释混淆绕 WAF（/*!50000*/ /**/）",
+   "rootCause": "WAF 按关键字拦截，但 MySQL 内联注释 /*!50000 UNION*/ 或 /**/ 拆词可绕过检测执行注入。",
+   "test": "用 UN/**/ION SEL/**/ECT、/*!50000UNION*/、%0a 换行拆词替换空格重放注入点看是否绕过 WAF 回显。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 不依赖 WAF：参数化 + 最小权限账号\n// WAF 仅作纵深，规则覆盖注释/编码变形"
+   },
+   "verify": [
+    "混淆 payload 无注入效果",
+    "参数化后注释无效"
+   ],
+   "guard": "sqlmap tamper 全量回归；DB 账号禁 FILE/SUPER"
+  },
+  "sec-sqli-second-order": {
+   "category": "security",
+   "severity": "high",
+   "title": "二次注入（存储后在别处拼接爆发）",
+   "rootCause": "输入入库时转义/参数化，但读出后在另一处拼接 SQL（如改名后查日志），存储的 payload 二次爆发。",
+   "test": "注册/改名为 admin'-- 或含 payload 的字符串，再触发会读取该字段的查询/导出/报表看是否注入。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 读出后同样参数化，禁止二次拼接\nconst rows = await db.query('SELECT * FROM logs WHERE user=$1', [user.name]);"
+   },
+   "verify": [
+    "存储 payload 二次查询无注入",
+    "全链路参数化"
+   ],
+   "guard": "CI 二次注入用例；代码搜索拼接点全覆盖"
+  },
+  "sec-sqli-error-based": {
+   "category": "security",
+   "severity": "high",
+   "title": "报错注入（extractvalue/updatexml 回显数据）",
+   "rootCause": "关闭回显但报错可见时，用 extractvalue/updatexml/geometry 触发含数据的报错逐段拖库。",
+   "test": "注入点加 and extractvalue(1,concat(0x7e,(select user()))) 看报错是否带出数据；试 updatexml/exp。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 参数化 + 生产关闭详细报错（统一错误页）\napp.use((err, req, res, next) => res.status(500).json({ error: 'internal' }));"
+   },
+   "verify": [
+    "报错不含数据/堆栈",
+    "注入无回显"
+   ],
+   "guard": "CI 报错注入用例；生产错误统一脱敏"
+  },
+  "sec-sqli-stacked": {
+   "category": "security",
+   "severity": "critical",
+   "title": "堆叠查询（; 多语句执行写操作）",
+   "rootCause": "驱动允许多语句时，输入 ;UPDATE/;DROP/;INSERT 可在注入点外执行任意写语句。",
+   "test": "注入点加 ;SELECT SLEEP(3) 看时延；授权环境试 ;UPDATE 测试表验证多语句是否开启。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 关闭多语句：mysql multipleStatements:false；pg 单语句参数化\nconst pool = mysql.createPool({ multipleStatements: false });"
+   },
+   "verify": [
+    "堆叠语句不执行",
+    "多语句配置关闭"
+   ],
+   "guard": "CI 堆叠用例；驱动配置审计"
+  },
+  "sec-pay-currency": {
+   "category": "security",
+   "severity": "critical",
+   "title": "币种/汇率篡改（低价币种结算高价商品）",
+   "rootCause": "币种/汇率由客户端提交或可改，用 USD 价付 CNY 单、或改汇率字段造成资损。",
+   "test": "下单抓包改 currency=USD/JPY、rate=0.01 重发；观察实付与结算币种是否被改。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 币种/汇率服务端按商品与支付渠道确定，不读客户端\nconst cur = product.currency;                    // 服务端来源\nconst rate = fx.rate(cur, settleCur);            // 服务端实时汇率"
+   },
+   "verify": [
+    "改币种/汇率被拒",
+    "结算按服务端汇率"
+   ],
+   "guard": "CI 币种篡改用例；汇率单一服务端来源"
+  },
+  "sec-pay-race-double": {
+   "category": "security",
+   "severity": "critical",
+   "title": "余额/库存并发双花（race condition）",
+   "rootCause": "扣余额/减库存先查后改无锁/无事务，并发请求同时读到旧值导致双花/超卖。",
+   "test": "用并发工具对同一余额/库存同时发 N 个扣减请求，观察是否扣成负数/超卖/余额只扣一次。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 原子扣减 + 条件更新（乐观锁）\nconst r = await db.query('UPDATE wallet SET bal=bal-$1 WHERE uid=$2 AND bal>=$1', [amt, uid]);\nif (r.rowCount === 0) throw new Error('insufficient');"
+   },
+   "verify": [
+    "并发扣减不超扣/不负",
+    "库存不超卖"
+   ],
+   "guard": "CI 并发双花用例；扣减统一原子 SQL/事务"
+  },
+  "sec-pay-refund-abuse": {
+   "category": "security",
+   "severity": "critical",
+   "title": "退款越权/超额/重复退款",
+   "rootCause": "退款接口不校验订单归属/可退余额/退款次数，可退他人单、退超实付、重复退。",
+   "test": "抓退款请求改 orderId 为他人、amount 大于实付、重复重发；观察是否成功退。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 校验归属+可退余额+幂等\nconst o = await order.get(id);\nif (o.userId !== req.user.id) return res.sendStatus(403);\nif (amt > o.paid - o.refunded) return res.status(400).end();\nawait refundOnce(o.id, amt);                     // 幂等"
+   },
+   "verify": [
+    "他人单/超额/重复退被拒",
+    "退款累计不超实付"
+   ],
+   "guard": "CI 退款越权/超额/重放用例"
+  },
+  "sec-pay-coupon-stack": {
+   "category": "security",
+   "severity": "high",
+   "title": "优惠券叠加/复用/负价组合",
+   "rootCause": "券可叠加/复用/与折扣组合后总价为负或零，或改 couponId 用他人券。",
+   "test": "下单叠加多张互斥券、同一券重复提交、组合满减使 total<=0；改 couponId 为他人券看是否可用。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 服务端校验券归属/互斥/单次/底价\nconst c = await coupon.get(id);\nif (c.ownerId !== uid || c.used || !stackable(c, others)) return res.status(400).end();\ntotal = Math.max(total, MIN_PRICE);"
+   },
+   "verify": [
+    "互斥券/复用/他人券被拒",
+    "总价不为负"
+   ],
+   "guard": "CI 券组合用例；底价与互斥规则服务端"
+  },
+  "sec-pay-status-client": {
+   "category": "security",
+   "severity": "critical",
+   "title": "订单状态前端可改/跳步到已支付",
+   "rootCause": "订单 status 由客户端提交或前端可改，直接置 paid/shipped 跳过支付/发货流程。",
+   "test": "抓订单更新请求改 status=paid 重发；或前端改状态看服务端是否复核支付凭证。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 状态机服务端驱动，paid 只能由支付回调置位\nconst NEXT = { created: ['paid', 'cancelled'], paid: ['shipped'] };\nif (!NEXT[cur].includes(target)) return res.status(400).end();\nif (target === 'paid' && !verifyPayCallback(sig)) return res.sendStatus(403);"
+   },
+   "verify": [
+    "客户端置 paid 被拒",
+    "状态跳步被状态机拦截"
+   ],
+   "guard": "CI 状态机用例；paid 仅回调可置"
+  },
+  "sec-pay-split-mismatch": {
+   "category": "security",
+   "severity": "high",
+   "title": "拆单/合并支付金额不一致",
+   "rootCause": "拆单/合单时子单金额之和与父单/实付不一致，或改子单金额造成少付多买。",
+   "test": "拆单下单抓包改子单 amount 使和小于父单；合单改总额；观察结算是否按错误金额。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 服务端校验 sum(子单)==父单==实付\nif (sum(subs.map(s => s.amount)) !== parent.amount) return res.status(400).end();"
+   },
+   "verify": [
+    "子单和被篡改被拒",
+    "结算金额一致"
+   ],
+   "guard": "CI 拆合单金额一致性用例"
+  },
+  "sec-secret-backup": {
+   "category": "security",
+   "severity": "critical",
+   "title": "备份/源码包可下载（.zip/.bak/.sql/.tar.gz）",
+   "rootCause": "部署遗留 backup.zip/wwwroot.rar/db.sql/.bak 在 Web 根目录可下载，内含源码+配置+数据库口令。",
+   "test": "探测 /backup.zip /wwwroot.zip /site.tar.gz /db.sql /database.sql /index.php.bak /config.bak 看是否 200 可下载。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# 部署清理备份；Web 根只放产物；服务器拒绝备份扩展名\nlocation ~* \\.(zip|rar|tar|gz|sql|bak|old)$ { return 404; }"
+   },
+   "verify": [
+    "备份路径 404/403",
+    "Web 根无备份文件"
+   ],
+   "guard": "CI 部署清单检查备份文件；服务器扩展名黑名单"
+  },
+  "sec-secret-repo-ci": {
+   "category": "security",
+   "severity": "high",
+   "title": "仓库/CI 配置泄露密钥（.gitlab-ci.yml/docker-compose）",
+   "rootCause": ".git 目录、.gitlab-ci.yml、docker-compose.yml、Jenkinsfile 可访问，内含仓库凭据/环境变量密钥/内网地址。",
+   "test": "探测 /.git/config /.gitlab-ci.yml /docker-compose.yml /Jenkinsfile /.env.production 看是否 200 含密钥。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# 禁止发布 VCS/CI 文件；密钥用 CI secret 变量不落盘\nlocation ~* /\\.(git|gitlab-ci.yml|env) { return 404; }"
+   },
+   "verify": [
+    "VCS/CI 路径 404",
+    "密钥不在仓库明文"
+   ],
+   "guard": "CI secret 扫描（gitleaks）；部署排除 VCS/CI"
+  },
+  "sec-secret-js-chunk": {
+   "category": "security",
+   "severity": "high",
+   "title": "前端 chunk 全量泄露密钥/内网地址",
+   "rootCause": "webpack/vite 分包把 admin/内部模块 chunk 也发布，扫描全部 chunk 可挖出密钥、内网 host、未公开接口。",
+   "test": "抓 main.js 提取 chunk 列表全量下载；grep api[_-]?key/secret/token/内网 IP/内部域名；结合 sourcemap 还原。",
+   "fix": {
+    "frontend": "// 内部/admin 模块独立构建不发布；密钥不进前端包",
+    "backend": "// 构建剔除敏感模块；环境变量仅 PUBLIC_ 前缀进包"
+   },
+   "verify": [
+    "公开 chunk 无密钥/内网地址",
+    "内部模块不可下载"
+   ],
+   "guard": "CI chunk 秘密扫描；构建环境变量白名单"
+  },
+  "sec-secret-default-cred": {
+   "category": "security",
+   "severity": "critical",
+   "title": "默认/弱口令（admin/admin、test/123456）",
+   "rootCause": "系统/后台/数据库保留默认或弱口令，攻击者字典即可登录。",
+   "test": "授权环境用 admin/admin、admin/123456、test/test、root/root 等常见组合试登录/后台/DB 端口。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 首启强制改默认口令；密码策略+锁定\nif (isDefaultPassword(user)) forceChangePassword();"
+   },
+   "verify": [
+    "默认口令登录失败",
+    "弱口令被策略拒绝"
+   ],
+   "guard": "CI 弱口令用例；上线清单强制改默认"
+  },
+  "sec-secret-swagger": {
+   "category": "security",
+   "severity": "high",
+   "title": "Swagger/OpenAPI 文档公开泄露全部接口",
+   "rootCause": "/swagger-ui.html、/v2/api-docs、/openapi.json 公开，暴露全部接口+参数+示例密钥，便于定向挖掘。",
+   "test": "探测 /swagger-ui.html /v2/api-docs /v3/api-docs /openapi.json /docs 看是否 200 返回接口定义。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 生产关闭或鉴权 swagger\nif (process.env.NODE_ENV === 'production') app.disable('swagger');"
+   },
+   "verify": [
+    "生产 swagger 404/401",
+    "接口定义不公开"
+   ],
+   "guard": "CI 探测 swagger 路径；生产配置审计"
+  },
+  "sec-secret-actuator": {
+   "category": "security",
+   "severity": "critical",
+   "title": "Actuator/heapdump 泄露 env 密码",
+   "rootCause": "Spring /actuator/env、/heapdump、/env 公开，env 含数据库/密钥明文，heapdump 可离线提取密码。",
+   "test": "探测 /actuator /actuator/env /actuator/heapdump /env /heapdump 看是否 200；env 是否含 password/secret。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "# 生产仅暴露 health/info 且鉴权\nmanagement.endpoints.web.exposure.include=health,info\nmanagement.endpoint.env.enabled=false"
+   },
+   "verify": [
+    "actuator/env/heapdump 404/401",
+    "env 无明文密钥"
+   ],
+   "guard": "CI 探测 actuator；生产端点白名单"
+  },
+  "sec-secret-hardcode-account": {
+   "category": "security",
+   "severity": "high",
+   "title": "代码/注释硬编码账号密码",
+   "rootCause": "源码/注释/配置文件硬编码测试账号、DB 口令、第三方 secret，随源码/备份泄露。",
+   "test": "grep 源码 password\\s*=、passwd、pwd=、secret=、AKIA、BEGIN PRIVATE KEY；检查注释与测试 fixture。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 凭据一律环境变量/secret 管理，不落源码\nconst dbPass = process.env.DB_PASS;              // 由 secret 注入"
+   },
+   "verify": [
+    "源码无硬编码凭据",
+    "gitleaks 扫描通过"
+   ],
+   "guard": "CI gitleaks/trufflehog 秘密扫描"
+  },
+  "sec-secret-plaintext-transit": {
+   "category": "security",
+   "severity": "high",
+   "title": "密码/凭据明文传输可嗅探",
+   "rootCause": "登录/改密走 HTTP 或混合内容，凭据明文过网可被嗅探/中间人截取。",
+   "test": "检查登录表单 action 是否 http://；抓包看密码字段是否明文；检查 HSTS 与全站 HTTPS。",
+   "fix": {
+    "frontend": "<form action=\"https://.../login\" method=\"post\">",
+    "backend": "// 全站 HTTPS + HSTS；拒绝 HTTP 登录\napp.use(helmet.hsts({ maxAge: 31536000, includeSubDomains: true }));"
+   },
+   "verify": [
+    "登录仅 HTTPS",
+    "HTTP 被重定向/拒绝",
+    "HSTS 生效"
+   ],
+   "guard": "CI 检查表单 action 协议；HSTS 审计"
+  },
+  "sec-api-bfla": {
+   "category": "security",
+   "severity": "high",
+   "title": "BFLA 功能级授权缺失（API 层）",
+   "rootCause": "API 按角色应限制的功能（审批/退款/导出）未做功能级鉴权，低权限 token 可直接调。",
+   "test": "用低权限 token 遍历高权限接口（/approve /refund /export /admin/*）看是否 200。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 功能级授权中间件按路由声明\nrouter.post('/refund', requirePermission('refund:create'), handler);"
+   },
+   "verify": [
+    "低权限调高功能 403",
+    "权限矩阵与路由一致"
+   ],
+   "guard": "CI 权限矩阵遍历用例"
+  },
+  "sec-api-graphql-introspect": {
+   "category": "security",
+   "severity": "medium",
+   "title": "GraphQL 内省公开 + 深度/别名 DoS",
+   "rootCause": "生产开 introspection 暴露全 schema；无深度/复杂度限制可用嵌套/别名查询打垮服务。",
+   "test": "POST /graphql {__schema{types{name}}} 看是否返回；发深层嵌套/大量别名查询观察耗时/是否限流。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 生产关内省 + 深度/复杂度限制\nconst server = new ApolloServer({ introspection: false,\n  plugins: [depthLimit(5), costLimit({ maxCost: 1000 })] });"
+   },
+   "verify": [
+    "生产内省关闭",
+    "超深/超贵查询被拒"
+   ],
+   "guard": "CI GraphQL 深度/成本用例"
+  },
+  "sec-api-graphql-batch-rate": {
+   "category": "security",
+   "severity": "high",
+   "title": "GraphQL 批量/别名绕过速率限制",
+   "rootCause": "速率限制按请求数计，GraphQL 单请求内批量/别名可发成百上千操作绕过限流撞库/爬取。",
+   "test": "单请求发别名数组 a1:login a2:login... 或 batch [op,op,...] 观察是否绕过限流。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 限流按操作数/成本计，禁 batch 或限制 batch 大小\nrateLimit({ key: uid, cost: opCount });           // 非请求数"
+   },
+   "verify": [
+    "批量/别名按操作数限流",
+    "撞库被拦"
+   ],
+   "guard": "CI GraphQL 限流用例"
+  },
+  "sec-api-ssrf": {
+   "category": "security",
+   "severity": "critical",
+   "title": "SSRF：url/webhook/图片抓取打内网",
+   "rootCause": "接口接受 url/webhook/图片地址并服务端请求，可指向内网/云元数据 169.254.169.254 偷凭据/打内网。",
+   "test": "url 参数填 http://127.0.0.1:port、http://169.254.169.254/latest/meta-data/、dict://、file:// 观察回显/时延/DNS 外带。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 协议+域名白名单 + 禁内网/元数据段 + 禁止重定向跟随\nconst u = new URL(input);\nif (!['https:'].includes(u.protocol) || isPrivate(u.hostname)) throw new Error('blocked');"
+   },
+   "verify": [
+    "内网/元数据地址被拒",
+    "仅白名单外网可达"
+   ],
+   "guard": "CI SSRF 用例；出口代理强制白名单"
+  },
+  "sec-api-resource-exhaust": {
+   "category": "security",
+   "severity": "high",
+   "title": "无限制资源消耗（大分页/大上传/无超时）",
+   "rootCause": "分页 pageSize 无上限、上传无大小/类型限制、查询无超时，单请求即可耗尽内存/CPU/磁盘。",
+   "test": "pageSize=1000000、上传超大文件、发慢查询/正则 ReDoS 串观察资源占用与是否限流/超时。",
+   "fix": {
+    "frontend": "// 无需前端改动。",
+    "backend": "// 上限+超时+流式\ntake: Math.min(pageSize, 200); upload.limit = 10MB; db.statement_timeout = 5000;"
+   },
+   "verify": [
+    "超限被截断/拒绝",
+    "慢查询被超时"
+   ],
+   "guard": "CI 资源上限用例；网关限流+超时"
+  },
+  "sec-api-property-level": {
+   "category": "security",
+   "severity": "medium",
+   "title": "对象属性级授权缺失（返回多余敏感字段）",
+   "rootCause": "接口返回整个对象含 passwordHash/internalNote/cost 等敏感属性，前端隐藏但响应可见。",
+   "test": "抓详情/列表响应检查是否含 passwordHash/salt/internal/cost/secret 等不应返回字段。",
+   "fix": {
+    "frontend": "// 前端不展示敏感字段",
+    "backend": "// 序列化白名单（DTO），禁止整对象直出\nres.json(pick(user, ['id', 'name', 'avatar']));    // 不含 hash/internal"
+   },
+   "verify": [
+    "响应无敏感属性",
+    "DTO 白名单生效"
+   ],
+   "guard": "CI 响应字段审计；序列化统一 DTO"
+  }
+ }
+}

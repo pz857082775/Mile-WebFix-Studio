@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Node
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Local delivery bundle (binaries live under release/)
+*.zip
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local secrets / config (never commit)
+.env
+*.local
+ai-config.json
