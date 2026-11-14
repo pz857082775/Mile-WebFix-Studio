@@ -22,6 +22,11 @@ export function OrchPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [editor, setEditor] = useState<Pipeline | null | undefined>(undefined); // undefined=closed, null=new
   const [delPipe, setDelPipe] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiPipe, setAiPipe] = useState<Pipeline | null>(null);
+  const [aiNote, setAiNote] = useState('');
+  const [aiSaving, setAiSaving] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
   const pipeIdRef = useRef(pipeId);
   pipeIdRef.current = pipeId;
@@ -89,6 +94,33 @@ export function OrchPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
     } catch (e: any) { toast(e.message); }
   };
 
+  const aiCompose = async () => {
+    const p = aiPrompt.trim();
+    if (!p) { toast('请描述你想要的功能，如「全站扫描并挖掘秘钥泄露和越权」'); return; }
+    setAiBusy(true);
+    setAiPipe(null);
+    try {
+      const r = await api<{ pipeline: Pipeline; source: string; explanation: string }>('/api/orch/ai-compose', { prompt: p });
+      setAiPipe(r.pipeline);
+      setAiNote(r.explanation || '');
+      toast(r.source === 'ai' ? 'AI 已自动编排' : '已按规则自动编排');
+    } catch (e: any) { toast(e.message); }
+    setAiBusy(false);
+  };
+
+  const saveAiPipe = async () => {
+    if (!aiPipe) return;
+    setAiSaving(true);
+    try {
+      const r = await api<{ pipeline: Pipeline }>('/api/orch/pipeline', aiPipe);
+      toast('编排已保存并选用');
+      setAiPipe(null);
+      setAiPrompt('');
+      loadPipelines(r.pipeline.id);
+    } catch (e: any) { toast(e.message); }
+    setAiSaving(false);
+  };
+
   const report = run && run.status !== 'running'
     ? Object.values(run.outputs || {}).find((o): o is { report: string } => !!o && typeof (o as any).report === 'string')
     : undefined;
@@ -106,6 +138,49 @@ export function OrchPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
         <StatCard color="purple" label="当前模式" value={pipe ? (MODE_LABEL[pipe.mode] || pipe.mode) : '—'} sub={pipe ? pipe.name : '未选择编排'}
           icon={<Ico d="M4 7h16M4 12h16M4 17h10" />} />
       </div>
+      <Section
+        title="AI 智能编排"
+        desc="用一句话描述想要的巡检 / 挖掘功能，AI 自动挑选合适的智能体 / SKILL / MCP / Bot 并生成协同流程（零成本模式按规则自动编排）。"
+        bodyClass="px-5 py-4"
+      >
+        <div className="flex flex-wrap gap-2">
+          <input
+            className="input flex-1 min-w-[260px]"
+            value={aiPrompt}
+            onChange={(e) => setAiPrompt(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') aiCompose(); }}
+            placeholder="例如：全站爬行扫描，重点挖掘秘钥泄露、SQL 注入与越权，最后汇总报告"
+          />
+          <button className="btn" disabled={aiBusy} onClick={aiCompose}>{aiBusy ? 'AI 编排中…' : 'AI 自动编排'}</button>
+        </div>
+        {aiPipe && (
+          <div className="mt-3 card !rounded-lg p-3 bg-side/60">
+            <div className="flex items-center gap-2 flex-wrap mb-2">
+              <span className="text-sm font-semibold text-ink">{aiPipe.name}</span>
+              <span className="badge cat">{MODE_LABEL[aiPipe.mode] || aiPipe.mode}</span>
+              <span className="text-[11px] text-ink-3">{aiPipe.steps.length} 个步骤</span>
+            </div>
+            {aiNote && <p className="text-[11px] text-ink-3 mb-2">{aiNote}</p>}
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              {aiPipe.steps.map((s, i) => (
+                <span key={i} className="flex items-center gap-2">
+                  {i > 0 && <span className="text-ink-3">{aiPipe.mode === 'parallel' ? '⇄' : '→'}</span>}
+                  <span className="card !rounded-lg px-2.5 py-1 flex flex-col items-start">
+                    <span className="text-xs font-semibold text-ink">{s.key}</span>
+                    <span className="text-[11px] text-ink-3">{s.ext}</span>
+                    {s.when && <span className="text-[11px] text-accent">当 {s.when.path} {s.when.op}</span>}
+                  </span>
+                </span>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button className="btn !h-8 !text-xs" disabled={aiSaving} onClick={saveAiPipe}>{aiSaving ? '保存中…' : '保存并选用'}</button>
+              <button className="btn-ghost !h-8 !text-xs" onClick={() => setAiPipe(null)}>丢弃</button>
+            </div>
+          </div>
+        )}
+      </Section>
+
       <Section
         title="协同编排"
         desc="串行 / 并行 / 条件流程编排智能体与扩展，上下文自动传递（url / findings / stats / outputs），失败可重试。"

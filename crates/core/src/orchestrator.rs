@@ -446,6 +446,89 @@ pub async fn get_run(state: &Arc<AppState>, id: &str) -> Option<Value> {
     }))
 }
 
+// ---- AI 对话自动编排：描述需求 → 自动挑选扩展并生成流程 ----
+
+fn enabled_exts() -> Vec<Value> {
+    load_store()["extensions"].as_array().cloned().unwrap_or_default()
+        .into_iter().filter(|e| e["enabled"].as_bool().unwrap_or(false)).collect()
+}
+
+fn has(exts: &[Value], id: &str) -> bool { exts.iter().any(|e| e["id"].as_str() == Some(id)) }
+
+/// 零成本规则编排：按关键词挑选已启用扩展，串行/并行流程
+fn rule_compose(prompt: &str, exts: &[Value]) -> Value {
+    let p = prompt.to_lowercase();
+    let mut steps: Vec<Value> = vec![];
+    fn push(steps: &mut Vec<Value>, exts: &[Value], key: &str, ext: &str, when: Option<Value>) {
+        if !has(exts, ext) { return; }
+        let mut st = json!({ "key": key, "ext": ext, "onError": "continue" });
+        if let Some(w) = when { st["when"] = w; }
+        steps.push(st);
+    }
+    let crawl = p.contains("全站") || p.contains("爬行") || p.contains("所有页面") || p.contains("crawl");
+    if crawl && has(&exts, "agent-crawl") { push(&mut steps, &exts, "crawl", "agent-crawl", None); } else { push(&mut steps, &exts, "scan", "agent-rule", None); }
+    if p.contains("秘钥") || p.contains("密钥") || p.contains("泄露") || p.contains("token") || p.contains("secret") {
+        push(&mut steps, &exts, "secret", "skill-secret", None);
+        push(&mut steps, &exts, "entropy", "skill-entropy", None);
+    }
+    if p.contains("响应头") || p.contains("header") || p.contains("cors") || p.contains("cookie") || p.contains("跨域") {
+        push(&mut steps, &exts, "headers", "skill-header", None);
+        push(&mut steps, &exts, "cors", "skill-cors", None);
+        push(&mut steps, &exts, "cookie", "skill-cookie", None);
+    }
+    if p.contains("sql") || p.contains("注入") { push(&mut steps, &exts, "sqli", "skill-sqli", None); push(&mut steps, &exts, "sqli-pro", "skill-sqli-pro", None); }
+    if p.contains("越权") || p.contains("idor") { push(&mut steps, &exts, "idor", "skill-idor", None); push(&mut steps, &exts, "idor-pro", "skill-idor-pro", None); }
+    if p.contains("jwt") || p.contains("令牌") { push(&mut steps, &exts, "jwt", "skill-jwt", None); }
+    if p.contains("ai") || p.contains("深度") || p.contains("逻辑") || p.contains("越权") || p.contains("资损") {
+        push(&mut steps, &exts, "deep", "agent-ai", Some(json!({ "path": "aiEnabled", "op": "truthy" })));
+    }
+    push(&mut steps, &exts, "report", "bot-report", None);
+    if steps.is_empty() { push(&mut steps, &exts, "scan", "agent-rule", None); push(&mut steps, &exts, "report", "bot-report", None); }
+    let mode = if p.contains("并行") || p.contains("同时") { "parallel" } else { "serial" };
+    json!({
+        "name": format!("AI 编排 · {}", trunc(prompt, 24)),
+        "description": "根据需求自动挑选扩展生成的协同流程",
+        "mode": mode, "steps": steps,
+    })
+}
+
+pub async fn ai_compose_pipeline(client: &reqwest::Client, prompt: &str) -> Result<Value, String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() { return Err("请描述你想要的巡检/挖掘功能".into()); }
+    let exts = enabled_exts();
+    if exts.is_empty() { return Err("请先在扩展中心启用至少一个扩展".into()); }
+    let c = crate::ai::load_config();
+    if c.enabled {
+        let catalog: Vec<String> = exts.iter().map(|e| format!("- {}（{}）：{}", e["id"].as_str().unwrap_or(""), e["type"].as_str().unwrap_or(""), e["description"].as_str().unwrap_or(""))).collect();
+        let system = format!(
+            "你是 Web 安全协同编排助手。根据用户需求，从下列已启用扩展中挑选合适的扩展，生成一个编排 JSON（只输出 JSON 对象，不要其它文字）。\n可用扩展：\n{}\n输出字段：name, mode(serial/parallel/conditional), description, steps:[{{key, ext, onError(continue/stop), when?:{{path, op, value}}}}]。\n条件 op 可选：truthy/falsy/eq/ne/gt/gte/lt/lte/includes;常用 path：aiEnabled、stats.total、stats.critical。ext 必须是上面列出的 id。流程通常以扫描开始、以 bot-report 汇总结束。",
+            catalog.join("\n"));
+        if let Ok(r) = crate::ai::chat(client, json!([
+            { "role": "system", "content": system },
+            { "role": "user", "content": trunc(prompt, 2000) },
+        ]), crate::ai::ChatOpts { config: Some(c.clone()), max_tokens: 1500, ..Default::default() }).await {
+            let cleaned = r.content.replace("```json", "").replace("```", "");
+            if let (Some(st), Some(en)) = (cleaned.find('{'), cleaned.rfind('}')) {
+                if en > st {
+                    if let Ok(v) = serde_json::from_str::<Value>(&cleaned[st..=en]) {
+                        if let Ok(mut p) = validate_pipeline(&v) {
+                            let valid: Vec<Value> = p["steps"].as_array().cloned().unwrap_or_default()
+                                .into_iter().filter(|s| has(&exts, s["ext"].as_str().unwrap_or(""))).collect();
+                            if !valid.is_empty() {
+                                p["steps"] = json!(valid);
+                                return Ok(json!({ "pipeline": p, "source": "ai", "model": r.model, "explanation": "AI 已自动挑选扩展并生成编排，可直接保存运行。" }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let p = validate_pipeline(&rule_compose(prompt, &exts))?;
+    let note = if c.enabled { "AI 输出不可用，已按规则自动编排。" } else { "零成本模式：已按关键词自动挑选扩展并编排（启用 AI 可获得更智能的编排）。" };
+    Ok(json!({ "pipeline": p, "source": "rule", "explanation": note }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +577,24 @@ mod tests {
         assert_eq!(ctx["stats"]["total"], 2);
         assert_eq!(ctx["stats"]["high"], 1);
         assert_eq!(ctx["stats"]["low"], 1);
+    }
+
+    #[test]
+    fn rule_compose_picks_enabled_exts() {
+        let exts = vec![
+            json!({ "id": "agent-rule", "enabled": true }),
+            json!({ "id": "skill-secret", "enabled": true }),
+            json!({ "id": "skill-entropy", "enabled": true }),
+            json!({ "id": "bot-report", "enabled": true }),
+            json!({ "id": "agent-ai", "enabled": false }),
+        ];
+        let p = rule_compose("扫描全站秘钥泄露", &exts);
+        let ids: Vec<&str> = p["steps"].as_array().unwrap().iter().map(|s| s["ext"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"agent-crawl") == false); // agent-crawl 未启用
+        assert!(ids.contains(&"agent-rule"));
+        assert!(ids.contains(&"skill-secret"));
+        assert!(ids.contains(&"bot-report"));
+        assert!(!ids.contains(&"agent-ai")); // 禁用扩展不入选
+        assert!(validate_pipeline(&p).is_ok());
     }
 }

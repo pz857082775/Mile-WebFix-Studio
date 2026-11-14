@@ -67,6 +67,8 @@ re!(re_js_replace, r#"(?i)\.js(\?.*)?$"#);
 re!(re_trace, r#"(?i)TRACE"#);
 re!(re_graphql, r#"(?i)__schema|queryType"#);
 re!(re_hidden_input, r#"(?i)<input\b[^>]*type\s*=\s*["']?hidden[^>]*>"#);
+re!(re_route_path, r#"(?:path|to|href|route|redirect|navigate|url)\s*[:=(]\s*["'](/[A-Za-z0-9_\-/:{}$.]{1,60})["']"#);
+re!(re_route_str, r#"["'](/[a-z][A-Za-z0-9_\-/]{1,40})["']"#);
 
 fn matches(r: &Regex, s: &str) -> Vec<String> {
     r.find_iter(s).map(|m| m.as_str().to_string()).collect()
@@ -321,6 +323,77 @@ pub fn extract_links(html: &str, base_url: &str) -> Vec<String> {
     out
 }
 
+/// SPA 路由发现：robots.txt + 同源 JS 包内的前端路由（react-router/vue-router 等），
+/// 并顺带扫描 JS 包内硬编码密钥。返回 (补充路由, JS 发现)。
+pub async fn discover_routes(html: &str, base_url: &str, follow: &Client, manual: &Client) -> (Vec<String>, Vec<Value>) {
+    let Ok(base) = Url::parse(base_url) else { return (vec![], vec![]) };
+    let Some(origin) = origin_of(&base) else { return (vec![], vec![]) };
+    let mut links: Vec<String> = Vec::new();
+    let mut findings: Vec<Value> = Vec::new();
+    let push_path = |p: &str, links: &mut Vec<String>| {
+        let p = p.trim();
+        if p.is_empty() || p.contains("//") { return; }
+        let Ok(mut u) = base.join(p) else { return };
+        if origin_of(&u).as_deref() != Some(origin.as_str()) { return; }
+        if u.scheme() != "http" && u.scheme() != "https" { return; }
+        u.set_fragment(None);
+        u.set_query(None);
+        if re_asset_ext().is_match(u.path()) || u.path() == "/" { return; }
+        let s = u.to_string();
+        if !links.contains(&s) { links.push(s); }
+    };
+
+    // robots.txt 暴露的路径
+    if let Ok(r) = manual.get(format!("{}/robots.txt", origin))
+        .timeout(Duration::from_secs(5)).header("User-Agent", UA).send().await
+    {
+        if r.status().is_success() {
+            let txt = r.text().await.unwrap_or_default();
+            for line in txt.lines() {
+                let l = line.trim();
+                let low = l.to_lowercase();
+                for pref in ["disallow:", "allow:", "sitemap:"] {
+                    if low.starts_with(pref) {
+                        let val = l[pref.len()..].trim();
+                        if val.starts_with('/') {
+                            push_path(val, &mut links);
+                        } else if val.starts_with("http") {
+                            if let Ok(u) = Url::parse(val) {
+                                if origin_of(&u).as_deref() == Some(origin.as_str()) { push_path(u.path(), &mut links); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 同源 JS 包：提取前端路由 + 硬编码密钥
+    let scripts: Vec<String> = re_script_src().captures_iter(html).map(|c| c[1].to_string()).collect();
+    let mut fetched = 0;
+    for s in scripts {
+        if fetched >= 6 { break; }
+        if !re_js_end().is_match(&s) { continue; }
+        let Ok(u) = base.join(&s) else { continue };
+        if origin_of(&u).as_deref() != Some(origin.as_str()) { continue; }
+        let Ok(r) = follow.get(u.as_str()).timeout(Duration::from_secs(8)).header("User-Agent", UA).send().await else { continue };
+        if !r.status().is_success() { continue; }
+        let js = r.text().await.unwrap_or_default();
+        if js.len() > 3_000_000 { continue; }
+        fetched += 1;
+        for c in re_route_path().captures_iter(&js) { push_path(&c[1], &mut links); }
+        for c in re_route_str().captures_iter(&js) { push_path(&c[1], &mut links); }
+        if let Some(m) = re_secret().find(&js) {
+            findings.push(json!({
+                "ruleId": "sec-secret-js-inline",
+                "evidence": format!("JS 包 {} 内疑似硬编码密钥：{}", u.path(), trunc(m.as_str(), 24)),
+            }));
+        }
+    }
+    links.truncate(120);
+    (links, findings)
+}
+
 fn set_cookies(headers: &HeaderMap) -> Vec<String> {
     headers.get_all(SET_COOKIE).iter().filter_map(|v| v.to_str().ok().map(String::from)).collect()
 }
@@ -417,6 +490,8 @@ async fn probe_extra(client: &Client, origin: &str, html: &str) -> Vec<Value> {
 
 pub struct ScanOpts {
     pub probe_paths: bool,
+    /// 发现 SPA 前端路由（robots.txt + JS 包），用于全站爬行覆盖每个界面
+    pub discover: bool,
 }
 
 /// 单页体检（与 JS scanTarget 输出结构一致）
@@ -460,6 +535,13 @@ pub async fn scan_target(follow: &Client, manual: &Client, raw_url: &str, opts: 
     raw.extend(scan_headers(&headers, url.as_str(), &cookies));
     raw.extend(scan_html(&html, url.as_str()));
 
+    let mut extra_links: Vec<String> = Vec::new();
+    if opts.discover {
+        let (el, jf) = discover_routes(&html, &final_url, follow, manual).await;
+        extra_links = el;
+        raw.extend(jf);
+    }
+
     if opts.probe_paths {
         let origin = origin_of(&url).unwrap_or_default();
         let hits = probe_paths(manual, &origin).await;
@@ -487,7 +569,8 @@ pub async fn scan_target(follow: &Client, manual: &Client, raw_url: &str, opts: 
     }
 
     let findings = enrich_findings(&merged);
-    let links = extract_links(&html, &final_url);
+    let mut links = extract_links(&html, &final_url);
+    for l in extra_links { if !links.contains(&l) { links.push(l); } }
     let mut hmap = Map::new();
     for (k, v) in headers.iter() {
         let val = v.to_str().unwrap_or("");

@@ -29,6 +29,7 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
   const [fx, setFx] = useState(true);
   const [allowSubmit, setAllowSubmit] = useState(false);
   const [pilotRunning, setPilotRunning] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const [logs, setLogs] = useState<{ t: string; msg: string; cls: string }[]>([]);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const pilotRef = useRef<any>(null);
@@ -46,6 +47,12 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
     };
   }, []);
   useEffect(() => { if (isLocalUrl(url)) setAuthorized(true); }, [url]);
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFullscreen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [fullscreen]);
 
   const addFinding = (f: Finding, furl: string) => {
     const key = findingKey(f, furl);
@@ -102,7 +109,8 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
       const loc = frameRef.current!.contentWindow!.location;
       const m = loc.pathname.match(/^\/proxy\/([^/]+)(\/.*)?$/);
       if (m && session) return session.origin + (m[2] || '/') + loc.search;
-      return loc.href;
+      // 钩子已把路径还原为干净路径（SPA 路由），直接拼目标 origin
+      return (session ? session.origin : '') + loc.pathname + loc.search;
     } catch { return ''; }
   };
 
@@ -240,6 +248,9 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
             <label className="flex items-center gap-1.5 text-xs text-ink-2 cursor-pointer">
               <input type="checkbox" className="accent-[#1677ff]" checked={allowSubmit} onChange={(e) => setAllowSubmit(e.target.checked)} />允许提交类按钮
             </label>
+            <span className="w-px h-5 bg-line mx-1" />
+            <button className="btn-ghost !h-8 !text-xs" onClick={() => setFullscreen(true)}>全屏展示</button>
+            <button className="btn-ghost !h-8 !text-xs" onClick={() => window.open(session.proxyUrl, '_blank', 'noopener')}>新窗口打开</button>
           </div>
         )}
         {status && <p className="text-[13px] text-ink-2 mt-2.5 animate-paneIn">{status}</p>}
@@ -256,8 +267,27 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
       )}
 
       {session && (
-        <div className="card overflow-hidden mb-4 animate-paneIn" style={{ height: 520 }}>
-          <iframe ref={frameRef} title="巡检浏览器" src={session.proxyUrl} className="w-full h-full border-0 bg-white" />
+        <div
+          className={fullscreen ? 'fixed inset-0 z-[200] bg-white flex flex-col animate-paneIn' : 'card overflow-hidden mb-4 animate-paneIn'}
+          style={fullscreen ? undefined : { height: 620 }}
+        >
+          {fullscreen && (
+            <div className="flex items-center justify-between gap-3 px-4 h-12 border-b border-line bg-panel shrink-0">
+              <span className="text-[13px] text-ink-2 truncate">巡检浏览器（全屏）· {url}</span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button className="btn-ghost !h-8 !text-xs" onClick={rescan}>体检当前页</button>
+                <button className="btn-ghost !h-8 !text-xs" onClick={() => window.open(session.proxyUrl, '_blank', 'noopener')}>新窗口打开</button>
+                <button className="btn !h-8 !text-xs" onClick={() => setFullscreen(false)}>退出全屏 (Esc)</button>
+              </div>
+            </div>
+          )}
+          <iframe
+            ref={frameRef}
+            title="巡检浏览器"
+            src={session.proxyUrl}
+            className="w-full flex-1 border-0 bg-white"
+            allow="clipboard-write; fullscreen; camera; microphone"
+          />
         </div>
       )}
 

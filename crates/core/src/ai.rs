@@ -145,14 +145,21 @@ pub async fn list_models(client: &reqwest::Client, c: &AiConfig) -> Result<Vec<S
         return Err(format!("模型列表返回 {}（部分服务商不支持 /models，可直接手填模型名）", r.status().as_u16()));
     }
     let data: Value = r.json().await.map_err(|_| "模型列表响应不是合法 JSON".to_string())?;
-    Ok(data["data"].as_array().map(|a| {
-        a.iter().filter_map(|m| m["id"].as_str().map(String::from)).take(200).collect()
+    // 兼容多种返回结构：OpenAI {data:[{id}]}、{models:[{id|name}]}、纯数组 [..]
+    let arr = data["data"].as_array()
+        .or_else(|| data["models"].as_array())
+        .or_else(|| data.as_array());
+    Ok(arr.map(|a| {
+        a.iter().filter_map(|m| {
+            m["id"].as_str().or_else(|| m["name"].as_str()).or_else(|| m.as_str())
+                .map(String::from)
+        }).take(300).collect()
     }).unwrap_or_default())
 }
 
-pub async fn test_connection(client: &reqwest::Client) -> Result<Value, String> {
+pub async fn test_connection(client: &reqwest::Client, c: AiConfig) -> Result<Value, String> {
     let r = chat(client, json!([{ "role": "user", "content": "连通性测试，请只回复：OK" }]),
-        ChatOpts { timeout_ms: 30_000, max_tokens: 10, config: None }).await?;
+        ChatOpts { timeout_ms: 30_000, max_tokens: 10, config: Some(c) }).await?;
     Ok(json!({ "ok": true, "model": r.model, "reply": trunc(&r.content, 50) }))
 }
 

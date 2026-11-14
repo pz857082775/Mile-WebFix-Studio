@@ -109,6 +109,25 @@ export interface Extension {
   updatedAt?: number;
 }
 
+export interface ExtPreset {
+  id: string;
+  type: string;
+  transport: string;
+  name: string;
+  version: string;
+  description: string;
+  category: string;
+  homepage: string;
+  installHint: string;
+  permissions: string[];
+  enabled: boolean;
+  command?: string;
+  args?: string[];
+  endpoint?: string;
+  module?: string;
+  config?: Record<string, unknown>;
+}
+
 export interface PipelineStep {
   key: string;
   ext: string;

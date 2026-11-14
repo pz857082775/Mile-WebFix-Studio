@@ -1,6 +1,6 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { api, isLocalUrl } from '../lib/api';
-import type { Extension } from '../lib/types';
+import type { Extension, ExtPreset } from '../lib/types';
 import { useToast } from '../components/Toast';
 import { Confirm, Modal } from '../components/Modal';
 import { PageHeader } from '../components/PageHeader';
@@ -36,6 +36,13 @@ export function ExtPage() {
   const [list, setList] = useState<Extension[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [formExt, setFormExt] = useState<Extension | null | undefined>(undefined); // undefined=closed, null=new
+  const [aiDraft, setAiDraft] = useState<Extension | null>(null); // AI/预设生成的新扩展草稿
+  const [presets, setPresets] = useState<ExtPreset[]>([]);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [installId, setInstallId] = useState('');
+  const [dragOver, setDragOver] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [invokeExt, setInvokeExt] = useState<Extension | null>(null);
   const [discover, setDiscover] = useState<{ ext: Extension; caps: unknown } | null>(null);
   const [busyId, setBusyId] = useState('');
@@ -56,7 +63,48 @@ export function ExtPage() {
       loadAudit();
     } catch (e: any) { toast('扩展加载失败：' + e.message); }
   };
-  useEffect(() => { load(); }, []);
+  const loadPresets = async () => {
+    try {
+      const d = await api<{ presets: ExtPreset[] }>('/api/ext/presets');
+      setPresets(d.presets);
+    } catch { /* 市场加载失败不阻塞主界面 */ }
+  };
+  useEffect(() => { load(); loadPresets(); }, []);
+
+  const installPreset = async (p: ExtPreset) => {
+    setInstallId(p.id);
+    try {
+      const r = await api<{ ext: Extension; installHint: string }>('/api/ext/install-preset', { id: p.id });
+      toast(`已接入「${r.ext.name}」${r.installHint ? ' · ' + r.installHint : ''}`);
+      load();
+    } catch (e: any) { toast(e.message); }
+    setInstallId('');
+  };
+
+  const aiCompose = async () => {
+    const p = aiPrompt.trim();
+    if (!p) { toast('请描述你想添加的扩展，如「接入 nuclei 漏扫」'); return; }
+    setAiBusy(true);
+    try {
+      const r = await api<{ draft: Extension; source: string; explanation: string }>('/api/ext/ai-compose', { prompt: p });
+      setAiDraft(r.draft);
+      toast(r.explanation || '已生成扩展草稿');
+    } catch (e: any) { toast(e.message); }
+    setAiBusy(false);
+  };
+
+  const importFiles = async (files: FileList | null) => {
+    if (!files || !files.length) return;
+    for (const f of Array.from(files)) {
+      try {
+        const content = await f.text();
+        const r = await api<{ ext: Extension; kind: string }>('/api/ext/import', { filename: f.name, content });
+        toast(`已导入「${r.ext.name}」（${r.kind === 'module' ? '本地技能' : '扩展配置'}）`);
+      } catch (e: any) { toast(`${f.name} 导入失败：` + e.message); }
+    }
+    load();
+    if (fileRef.current) fileRef.current.value = '';
+  };
 
   const toggle = async (ext: Extension, enabled: boolean) => {
     try {
@@ -92,6 +140,76 @@ export function ExtPage() {
           );
         })}
       </div>
+
+      <Section
+        title="AI 对话添加 · 拖拽导入"
+        desc="用一句话描述需求，AI 自动从开源社区匹配 / 生成扩展配置;或把 .mjs/.py 技能、.json MCP 配置拖进来一键导入。"
+        bodyClass="px-5 py-4"
+      >
+        <div className="flex flex-wrap gap-2">
+          <input
+            className="input flex-1 min-w-[260px]"
+            value={aiPrompt}
+            onChange={(e) => setAiPrompt(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') aiCompose(); }}
+            placeholder="例如：接入 nuclei 漏扫 / 添加 JWT 分析 / 帮我写一个检测 CORS 的技能"
+          />
+          <button className="btn" disabled={aiBusy} onClick={aiCompose}>{aiBusy ? 'AI 生成中…' : 'AI 生成扩展'}</button>
+        </div>
+        <div
+          className={`mt-3 rounded-pane border-2 border-dashed px-4 py-6 text-center cursor-pointer transition-colors ${dragOver ? 'border-accent bg-accent-soft' : 'border-line bg-side/50 hover:border-accent/50'}`}
+          onClick={() => fileRef.current?.click()}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={(e) => { e.preventDefault(); setDragOver(false); importFiles(e.dataTransfer.files); }}
+        >
+          <input ref={fileRef} type="file" multiple accept=".mjs,.js,.cjs,.py,.json" className="hidden" onChange={(e) => importFiles(e.target.files)} />
+          <div className="text-sm font-medium text-ink">拖拽文件到此处，或点击选择</div>
+          <div className="text-xs text-ink-3 mt-1">支持 .mjs / .js / .py 本地技能（自动落盘到技能目录）与 .json 扩展 / MCP 配置</div>
+        </div>
+      </Section>
+
+      <Section
+        title="开源安全扩展市场"
+        desc="内置增强技能零成本开箱即用;开源工具（Nuclei / sqlmap / Semgrep / ZAP 等）一键接入配置，本机安装后即可启用。"
+        actions={<button className="btn-ghost !h-8 !text-xs" onClick={loadPresets}>刷新</button>}
+        bodyClass="px-5 py-4"
+      >
+        {['内置增强 · 零成本', '开源工具 · 需安装'].map((cat) => {
+          const items = presets.filter((p) => p.category === cat);
+          if (!items.length) return null;
+          return (
+            <div key={cat} className="mb-4 last:mb-0">
+              <div className="text-xs font-semibold text-ink-2 mb-2">{cat}</div>
+              <div className="grid grid-cols-2 gap-2.5">
+                {items.map((p) => {
+                  const installed = list.some((e) => e.id === p.id);
+                  return (
+                    <div key={p.id} className="card !rounded-lg p-3 flex flex-col gap-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`tile-sm cat-${EXT_COLOR[p.type] || 'blue'}`}>{EXT_TYPE[p.type]?.icon}</span>
+                        <span className="text-sm font-semibold text-ink">{p.name}</span>
+                        <Tag kind="purple">{p.transport}</Tag>
+                      </div>
+                      <p className="text-xs text-ink-2 leading-relaxed">{p.description}</p>
+                      {p.installHint && <p className="text-[11px] text-ink-3 leading-relaxed">{p.installHint}</p>}
+                      <div className="flex items-center gap-2 mt-auto pt-1">
+                        <button
+                          className={installed ? 'btn-ghost !h-7 !px-2.5 !text-xs' : 'btn !h-7 !px-2.5 !text-xs'}
+                          disabled={installed || installId === p.id}
+                          onClick={() => installPreset(p)}
+                        >{installed ? '已接入' : installId === p.id ? '接入中…' : '一键接入'}</button>
+                        {p.homepage && <a className="text-[11px] text-accent hover:underline" href={p.homepage} target="_blank" rel="noopener noreferrer">开源主页</a>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+        {!presets.length && <p className="text-xs text-ink-3">市场加载中…</p>}
+      </Section>
 
       <Section
         title="已注册扩展"
@@ -156,6 +274,9 @@ export function ExtPage() {
       {formExt !== undefined && meta && (
         <ExtForm meta={meta} ext={formExt} onClose={() => setFormExt(undefined)} onSaved={() => { setFormExt(undefined); load(); }} />
       )}
+      {aiDraft && meta && (
+        <ExtForm meta={meta} ext={aiDraft} isNew onClose={() => setAiDraft(null)} onSaved={() => { setAiDraft(null); setAiPrompt(''); load(); }} />
+      )}
       {invokeExt && <InvokeModal ext={invokeExt} onClose={() => setInvokeExt(null)} onDone={loadAudit} />}
       {discover && (
         <Modal title={`发现 · ${discover.ext.name}`} onClose={() => setDiscover(null)} wide>
@@ -182,9 +303,9 @@ export function ExtPage() {
   );
 }
 
-function ExtForm({ meta, ext, onClose, onSaved }: { meta: ExtMeta; ext: Extension | null; onClose: () => void; onSaved: () => void }) {
+function ExtForm({ meta, ext, isNew, onClose, onSaved }: { meta: ExtMeta; ext: Extension | null; isNew?: boolean; onClose: () => void; onSaved: () => void }) {
   const toast = useToast();
-  const isEdit = !!ext;
+  const isEdit = !!ext && !isNew;
   const [type, setType] = useState(ext?.type || 'agent');
   const [transport, setTransport] = useState(ext?.transport || 'http');
   const [id, setId] = useState(ext?.id || '');
@@ -249,12 +370,12 @@ function ExtForm({ meta, ext, onClose, onSaved }: { meta: ExtMeta; ext: Extensio
           <input className="input" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://你的扩展服务.example" />
         </label>
       )}
-      {transport === 'stdio' && (
+      {(transport === 'stdio' || transport === 'cli') && (
         <>
-          <label className="block mt-3"><span className="label">Command（stdio MCP 启动命令）</span>
+          <label className="block mt-3"><span className="label">Command（{transport === 'cli' ? '本机命令，如 nuclei' : 'stdio MCP 启动命令'}）</span>
             <input className="input" value={command} onChange={(e) => setCommand(e.target.value)} placeholder="node" />
           </label>
-          <label className="block mt-3"><span className="label">Args（逗号分隔）</span>
+          <label className="block mt-3"><span className="label">Args（逗号分隔{transport === 'cli' ? '，{url} 会替换为目标地址' : ''}）</span>
             <input className="input" value={args} onChange={(e) => setArgs(e.target.value)} placeholder="server.mjs,--port,3000" />
           </label>
         </>

@@ -159,7 +159,7 @@ console.log('== 扩展中心 ==');
 let extId;
 {
   const meta = await j('/api/ext/meta');
-  ok('ext meta', meta.data.types.length === 4 && meta.data.transports.length === 5 && meta.data.modes.length === 3 && meta.data.ops.length === 9);
+  ok('ext meta', meta.data.types.length === 4 && meta.data.transports.length === 6 && meta.data.modes.length === 3 && meta.data.ops.length === 9);
   const list = await j('/api/ext/list');
   ok('ext 内置 8 个', list.data.extensions.filter((e) => e.builtin).length === 8);
   const reg = await j('/api/ext/register', { type: 'skill', transport: 'builtin', name: '冒烟技能' });
@@ -181,6 +181,45 @@ let extId;
   ok('ext 删除', rm.status === 200);
   const rmBuiltin = await j('/api/ext/remove', { id: 'skill-header' });
   ok('ext 内置保护', rmBuiltin.status === 400);
+}
+
+console.log('== 扩展市场 / AI 添加 / 拖拽导入 ==');
+{
+  const ps = await j('/api/ext/presets');
+  ok('presets 列表', ps.status === 200 && ps.data.presets.length >= 12);
+  ok('presets 含 nuclei', ps.data.presets.some((p) => p.id === 'tool-nuclei' && p.transport === 'cli'));
+  ok('presets 含 module 技能', ps.data.presets.some((p) => p.id === 'skill-jwt' && p.transport === 'module'));
+  // 一键接入内置 module 技能（零成本开箱即用）
+  const inst = await j('/api/ext/install-preset', { id: 'skill-jwt' });
+  ok('install module 预设', inst.status === 200 && inst.data.ext.id === 'skill-jwt' && inst.data.ext.transport === 'module', JSON.stringify(inst.data).slice(0, 150));
+  const dup = await j('/api/ext/install-preset', { id: 'skill-jwt' });
+  ok('install 重复拒绝', dup.status === 400);
+  // 调用刚接入的 module 技能（Node 执行，本地演示无需授权）
+  const inv = await j('/api/ext/invoke', { id: 'skill-jwt', input: { url: BASE + '/demo', html: '<script>var t="eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.x";</script>' }, ctx: {}, authorized: true });
+  ok('module 技能执行', inv.status === 200 && inv.data.ok === true, JSON.stringify(inv.data).slice(0, 200));
+  // 接入外部 cli 工具预设（默认禁用）
+  const instCli = await j('/api/ext/install-preset', { id: 'tool-nuclei' });
+  ok('install cli 预设', instCli.status === 200 && instCli.data.ext.transport === 'cli' && instCli.data.ext.enabled === false);
+  // AI 对话添加：命中预设（零成本）
+  const ai = await j('/api/ext/ai-compose', { prompt: '帮我接入 nuclei 漏扫' });
+  ok('ai-compose 命中预设', ai.status === 200 && ai.data.source === 'preset' && ai.data.draft.id === 'tool-nuclei');
+  const aiEmpty = await j('/api/ext/ai-compose', { prompt: '' });
+  ok('ai-compose 空 prompt 拒绝', aiEmpty.status === 502);
+  // 拖拽导入：.mjs 技能
+  const imp = await j('/api/ext/import', { filename: 'smoke-skill.mjs', content: 'export default function(){return {output:{ok:1},findings:[]};}' });
+  ok('import mjs 技能', imp.status === 200 && imp.data.kind === 'module' && imp.data.ext.transport === 'module', JSON.stringify(imp.data).slice(0, 150));
+  const impInv = await j('/api/ext/invoke', { id: imp.data.ext.id, input: { url: BASE + '/demo' }, ctx: {}, authorized: true });
+  ok('import 技能可执行', impInv.status === 200 && impInv.data.ok === true);
+  // 拖拽导入：.json MCP 配置
+  const impJson = await j('/api/ext/import', { filename: 'mcp.json', content: JSON.stringify({ mcpServers: { smoke: { command: 'node', args: ['x.mjs'] } } }) });
+  ok('import json MCP', impJson.status === 200 && impJson.data.ext.type === 'mcp' && impJson.data.ext.transport === 'stdio');
+  const impBad = await j('/api/ext/import', { filename: 'x.txt', content: 'hi' });
+  ok('import 不支持类型拒绝', impBad.status === 400);
+  // 清理导入的扩展
+  await j('/api/ext/remove', { id: 'skill-jwt' });
+  await j('/api/ext/remove', { id: 'tool-nuclei' });
+  await j('/api/ext/remove', { id: imp.data.ext.id });
+  await j('/api/ext/remove', { id: impJson.data.ext.id });
 }
 
 console.log('== 协同编排 ==');
@@ -219,6 +258,12 @@ let pipeId, runId;
   ok('orch 删除', rm.status === 200);
   const rmB = await j('/api/orch/pipeline/remove', { id: 'pipe-standard' });
   ok('orch 内置保护', rmB.status === 400);
+  // AI 自动编排（零成本规则模式）
+  const aiPipe = await j('/api/orch/ai-compose', { prompt: '扫描全站并挖掘秘钥泄露，最后汇总报告' });
+  ok('orch ai-compose', aiPipe.status === 200 && Array.isArray(aiPipe.data.pipeline?.steps) && aiPipe.data.pipeline.steps.length >= 2, JSON.stringify(aiPipe.data).slice(0, 200));
+  ok('orch ai-compose 含 report', aiPipe.data.pipeline.steps.some((s) => s.ext === 'bot-report'));
+  const aiEmpty = await j('/api/orch/ai-compose', { prompt: '' });
+  ok('orch ai-compose 空拒绝', aiEmpty.status === 502);
   const st404 = await j('/api/orch/run-status?id=nope');
   ok('orch run 404', st404.status === 404);
 }

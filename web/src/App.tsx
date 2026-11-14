@@ -6,6 +6,7 @@ import { StatusBar } from './components/StatusBar';
 import { About } from './components/About';
 import { ToastProvider } from './components/Toast';
 import { api } from './lib/api';
+import { onTauriEvent } from './lib/tauri';
 import type { Finding, PageId, Rule } from './lib/types';
 import { ScanPage } from './pages/ScanPage';
 import { CrawlPage } from './pages/CrawlPage';
@@ -35,6 +36,13 @@ export default function App() {
     setTabs((t) => (t.includes(id) ? t : [...t, id]));
     setActive(id);
   };
+  // 桌面托盘「设置软件」→ 打开 AI 设置页（网页版无此事件，自动忽略）
+  useEffect(() => {
+    const off = onTauriEvent('wf-navigate', (id) => {
+      if (typeof id === 'string') openTab(id as PageId);
+    });
+    return () => { off?.(); };
+  }, []);
   const closeTab = (id: PageId) => {
     const next = tabs.filter((x) => x !== id);
     setTabs(next);

@@ -59,22 +59,37 @@ export function AiPage() {
   };
 
   const test = async () => {
+    if (!baseUrl.trim()) { setStatus('请先填写 API 地址'); return; }
+    if (!model.trim()) { setStatus('请先选择或填写模型名称'); return; }
     setStatus('正在测试连接…');
     try {
-      const d = await api<{ model: string; reply: string }>('/api/ai/test', {});
+      const d = await api<{ model: string; reply: string }>('/api/ai/test', {
+        baseUrl: baseUrl.trim(), model: model.trim(), provider, apiKey: apiKey.trim(),
+      });
       setStatus(`连接成功：模型 ${d.model} 回复「${d.reply}」`);
       toast('AI 连接成功');
     } catch (e: any) { setStatus('连接失败：' + e.message); }
   };
 
   const pullModels = async () => {
+    if (!baseUrl.trim()) { setStatus('请先填写 API 地址'); return; }
     setStatus('正在拉取模型列表…');
+    const preset = presetOf(provider)?.models || [];
     try {
       const d = await api<{ models: string[] }>('/api/ai/models', { baseUrl: baseUrl.trim(), apiKey: apiKey.trim() });
-      setModels(d.models);
-      if (!model && d.models[0]) setModel(d.models[0]);
-      setStatus(`拉取到 ${d.models.length} 个模型，已在「模型名称」下拉候选中。`);
-    } catch (e: any) { setStatus('拉取失败：' + e.message); }
+      const merged = [...new Set([...(d.models || []), ...preset])];
+      setModels(merged);
+      if (!model && merged[0]) setModel(merged[0]);
+      setStatus(`拉取到 ${d.models?.length || 0} 个模型${preset.length ? `（含 ${preset.length} 个预设候选）` : ''}，已在「模型名称」下拉候选中。`);
+    } catch (e: any) {
+      if (preset.length) {
+        setModels(preset);
+        if (!model && preset[0]) setModel(preset[0]);
+        setStatus(`该服务商暂不支持自动拉取（${e.message}），已填入 ${preset.length} 个预设模型，可直接选择或手填。`);
+      } else {
+        setStatus('拉取失败：' + e.message + '（可直接在「模型名称」手填）');
+      }
+    }
   };
 
   const clearKey = async () => {

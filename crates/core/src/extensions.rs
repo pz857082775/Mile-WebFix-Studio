@@ -15,7 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 
 pub const TYPES: [&str; 4] = ["agent", "skill", "mcp", "bot"];
-pub const TRANSPORTS: [&str; 5] = ["builtin", "http", "openai", "module", "stdio"];
+pub const TRANSPORTS: [&str; 6] = ["builtin", "http", "openai", "module", "stdio", "cli"];
 pub const PERMISSIONS: [&str; 6] = ["scan", "network", "llm", "read_html", "mcp", "notify"];
 
 fn required(type_: &str, transport: &str) -> Vec<&'static str> {
@@ -23,13 +23,17 @@ fn required(type_: &str, transport: &str) -> Vec<&'static str> {
         ("agent", "builtin") => vec!["scan"],
         ("agent", "http") => vec!["network"],
         ("agent", "openai") => vec!["llm"],
+        ("agent", "cli") => vec!["scan", "network"],
         ("skill", "builtin") => vec!["read_html"],
         ("skill", "http") => vec!["network"],
         ("skill", "module") => vec!["read_html"],
+        ("skill", "cli") => vec!["network"],
         ("mcp", "stdio") => vec!["mcp"],
         ("mcp", "http") => vec!["mcp", "network"],
+        ("mcp", "cli") => vec!["mcp", "network"],
         ("bot", "builtin") => vec!["notify"],
         ("bot", "http") => vec!["network", "notify"],
+        ("bot", "cli") => vec!["network", "notify"],
         _ => vec![],
     }
 }
@@ -225,8 +229,8 @@ pub async fn register_ext(input: &Value) -> Result<Value, String> {
             return Err(format!("module 技能必须位于 {}", skills_dir().display()));
         }
     }
-    if transport == "stdio" && s(input, "command").is_empty() {
-        return Err("stdio 传输需提供 command".into());
+    if (transport == "stdio" || transport == "cli") && s(input, "command").is_empty() {
+        return Err("stdio/cli 传输需提供 command".into());
     }
     let perms: Vec<Value> = input["permissions"].as_array().map(|a| {
         a.iter().filter(|p| p.as_str().map(|x| PERMISSIONS.contains(&x)).unwrap_or(false)).cloned().collect()
@@ -525,7 +529,54 @@ async fn dispatch(state: &Arc<AppState>, ext: &Value, input: Value, ctx: Value) 
         let findings = if out["findings"].is_array() { out["findings"].clone() } else { json!([]) };
         return Ok(json!({ "output": out, "findings": findings }));
     }
+    if transport == "cli" {
+        let out = run_cli(ext, &input, &ctx).await?;
+        let findings = if out["findings"].is_array() { out["findings"].clone() } else { json!([]) };
+        return Ok(json!({ "output": out, "findings": findings }));
+    }
     Err(format!("未实现的传输：{}:{}", type_, transport))
+}
+
+// cli 传输：本机命令行工具（nuclei/sqlmap/semgrep 等），JSON stdin → stdout（JSON 或纯文本）
+async fn run_cli(ext: &Value, input: &Value, ctx: &Value) -> Result<Value, String> {
+    let command = s(ext, "command");
+    let mut args: Vec<String> = ext["args"].as_array().map(|a| {
+        a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+    }).unwrap_or_default();
+    let url = {
+        let u = s(input, "url");
+        if u.is_empty() { s(ctx, "url") } else { u }
+    };
+    // 模板替换：args 中的 {url} 替换为目标地址，便于适配各类 CLI
+    for a in args.iter_mut() {
+        if a.contains("{url}") { *a = a.replace("{url}", &url); }
+    }
+    let payload = json!({ "input": input, "ctx": ctx }).to_string();
+    let mut child = tokio::process::Command::new(&command)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动命令 {}（请确认已安装该开源工具并加入 PATH）：{}", command, e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(payload.as_bytes()).await;
+        let _ = stdin.shutdown().await;
+    }
+    let out = tokio::time::timeout(Duration::from_secs(120), child.wait_with_output()).await
+        .map_err(|_| "cli 工具执行超时（120s）".to_string())?
+        .map_err(|e| format!("cli 工具执行失败：{}", e))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if !out.status.success() && text.trim().is_empty() {
+        return Err(format!("cli 工具退出码 {:?}：{}", out.status.code(), trunc(err.trim(), 300)));
+    }
+    // 优先解析 JSON（{output,findings} 或 findings 数组），否则按纯文本输出
+    if let Ok(v) = serde_json::from_str::<Value>(text.trim()) {
+        if v.is_object() { return Ok(v); }
+        if v.is_array() { return Ok(json!({ "output": { "raw": v }, "findings": [] })); }
+    }
+    Ok(json!({ "output": { "stdout": trunc(text.trim(), 20000), "stderr": trunc(err.trim(), 2000) }, "findings": [] }))
 }
 
 // module 技能：本地脚本（.js/.mjs 用 Node 执行，.py 用 Python 执行），JSON stdin → JSON stdout
@@ -595,7 +646,7 @@ async fn builtin_agent(state: &Arc<AppState>, ext: &Value, input: &Value, ctx: &
     };
     if id == "agent-rule" {
         if url.is_empty() { return Err("agent-rule 需要 input.url".into()); }
-        let r = scan_target(&state.follow, &state.manual, &url, ScanOpts { probe_paths: input["probePaths"].as_bool().unwrap_or(false) }).await?;
+        let r = scan_target(&state.follow, &state.manual, &url, ScanOpts { probe_paths: input["probePaths"].as_bool().unwrap_or(false), discover: false }).await?;
         let findings = r["findings"].as_array().cloned().unwrap_or_default();
         return Ok(json!({
             "output": { "status": r["status"], "pages": 1, "headers": r["headers"], "html": r["html"] },
@@ -739,4 +790,278 @@ pub async fn discover_ext(state: &Arc<AppState>, id: &str) -> Result<Value, Stri
     Ok(json!({ "capabilities": {
         "name": ext["name"], "type": ext["type"], "transport": ext["transport"], "permissions": ext["permissions"],
     } }))
+}
+
+// ---- 开源安全扩展市场：内置增强技能（零成本开箱即用）+ 开源工具适配（需本机安装）----
+
+/// 内置增强 module 技能源码（Node ESM，default(input,ctx) → {output,findings}）
+fn module_source(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "skill-jwt" => r#"
+const F = (title, severity, rootCause, evidence, url) => ({ title, category: 'security', severity, rootCause, evidence, url, source: 'skill', ruleId: null });
+export default function (input = {}, ctx = {}) {
+  const url = input.url || ctx.url || '';
+  const hay = [input.html || '', JSON.stringify(ctx.headers || {}), JSON.stringify(input.headers || {})].join('\n');
+  const tokens = [...new Set((hay.match(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g) || []))];
+  const findings = []; const decoded = [];
+  for (const t of tokens.slice(0, 10)) {
+    try {
+      const [h, p] = t.split('.');
+      const dec = (x) => JSON.parse(Buffer.from(x.replace(/-/g,'+').replace(/_/g,'/'), 'base64').toString('utf8'));
+      const head = dec(h), payload = dec(p); decoded.push({ head, payload });
+      if (!head.alg || String(head.alg).toLowerCase() === 'none') findings.push(F('JWT 使用 none 算法', 'critical', '签名算法为 none，可伪造任意身份', 'alg=' + head.alg, url));
+      if (!payload.exp) findings.push(F('JWT 缺少过期时间 exp', 'high', '令牌永不过期，泄露后长期有效', 'payload 无 exp 字段', url));
+      if (payload.exp && payload.exp * 1000 - Date.now() > 30 * 864e5) findings.push(F('JWT 有效期过长', 'medium', 'exp 超过 30 天，泄露风险窗口大', 'exp=' + payload.exp, url));
+      if (/(password|passwd|secret|api_?key)/i.test(JSON.stringify(payload))) findings.push(F('JWT 载荷含敏感字段', 'high', '令牌中携带密码/密钥等敏感信息', 'payload 含敏感键', url));
+    } catch (e) { /* 非标准 JWT 跳过 */ }
+  }
+  return { output: { checked: 'jwt', tokens: tokens.length, decoded }, findings };
+}
+"#,
+        "skill-entropy" => r#"
+const F = (title, severity, rootCause, evidence, url) => ({ title, category: 'security', severity, rootCause, evidence, url, source: 'skill', ruleId: null });
+const entropy = (s) => { const m = {}; for (const c of s) m[c] = (m[c]||0)+1; return -Object.values(m).reduce((a,n)=>{const p=n/s.length;return a+p*Math.log2(p);},0); };
+export default function (input = {}, ctx = {}) {
+  const url = input.url || ctx.url || ''; const html = input.html || ctx.html || '';
+  const findings = []; const hits = [];
+  const patterns = [
+    [/AKIA[0-9A-Z]{16}/g, 'AWS Access Key', 'critical'],
+    [/AIza[0-9A-Za-z_-]{35}/g, 'Google API Key', 'high'],
+    [/sk-[A-Za-z0-9]{20,}/g, 'OpenAI/Stripe Secret Key', 'critical'],
+    [/ghp_[A-Za-z0-9]{36}/g, 'GitHub PAT', 'critical'],
+    [/xox[baprs]-[A-Za-z0-9-]{10,}/g, 'Slack Token', 'high'],
+    [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/g, '私钥文件', 'critical'],
+  ];
+  for (const [re, name, sev] of patterns) { const m = html.match(re); if (m) { hits.push({ name, count: m.length }); findings.push(F('硬编码 ' + name, sev, '源码/页面中泄露 ' + name, name + ' × ' + m.length, url)); } }
+  const cand = html.match(/["'][A-Za-z0-9+/=_-]{32,}["']/g) || [];
+  for (const c of cand.slice(0, 200)) { const v = c.slice(1,-1); if (entropy(v) > 4.2 && !/^[a-f0-9]+$/i.test(v)) { hits.push({ name: '高熵字符串', sample: v.slice(0,12)+'…' }); findings.push(F('疑似高熵密钥/令牌', 'medium', '香农熵 > 4.2 的长随机串，可能为密钥', v.slice(0,16)+'…', url)); break; } }
+  return { output: { checked: 'entropy', hits }, findings: findings.slice(0, 12) };
+}
+"#,
+        "skill-cors" => r#"
+const F = (title, severity, rootCause, evidence, url) => ({ title, category: 'security', severity, rootCause, evidence, url, source: 'skill', ruleId: null });
+export default function (input = {}, ctx = {}) {
+  const url = input.url || ctx.url || '';
+  const h = input.headers || ctx.headers || {}; const lower = {}; for (const k in h) lower[k.toLowerCase()] = String(h[k]);
+  const findings = []; const acao = lower['access-control-allow-origin'], acac = lower['access-control-allow-credentials'];
+  if (acao === '*' && acac === 'true') findings.push(F('CORS 通配符 + 允许凭证', 'high', 'ACAO:* 与 ACAC:true 组合配置错误，浏览器会拒绝但反映配置混乱', 'ACAO=* ACAC=true', url));
+  if (acao === '*') findings.push(F('CORS 允许任意来源', 'medium', 'Access-Control-Allow-Origin 为 *，敏感接口不应放开', 'ACAO=*', url));
+  if (acao === 'null') findings.push(F('CORS 允许 null 来源', 'high', '沙箱 iframe / data URL 可发起带凭证请求', 'ACAO=null', url));
+  if (acac === 'true' && acao && acao !== '*') findings.push(F('CORS 反射来源且允许凭证', 'medium', '动态反射 Origin + 允许凭证，需校验白名单', 'ACAO=' + acao + ' ACAC=true', url));
+  return { output: { checked: 'cors', acao: acao || null, acac: acac || null }, findings };
+}
+"#,
+        "skill-cookie" => r#"
+const F = (title, severity, rootCause, evidence, url) => ({ title, category: 'security', severity, rootCause, evidence, url, source: 'skill', ruleId: null });
+export default function (input = {}, ctx = {}) {
+  const url = input.url || ctx.url || '';
+  const h = input.headers || ctx.headers || {}; let raw = '';
+  for (const k in h) if (k.toLowerCase() === 'set-cookie') raw = String(h[k]);
+  const cookies = input.cookies || (raw ? raw.split(/,(?=[^;]+=)/) : []);
+  const findings = []; const checked = [];
+  for (const c of cookies.slice(0, 20)) {
+    const name = (c.split('=')[0]||'').trim(); checked.push(name);
+    if (!/httponly/i.test(c)) findings.push(F('Cookie 缺少 HttpOnly：' + name, 'medium', '脚本可读取 Cookie，XSS 可窃取会话', name, url));
+    if (!/secure/i.test(c)) findings.push(F('Cookie 缺少 Secure：' + name, 'medium', 'Cookie 可经明文 HTTP 传输', name, url));
+    if (!/samesite/i.test(c)) findings.push(F('Cookie 缺少 SameSite：' + name, 'low', '易受 CSRF 跨站携带', name, url));
+  }
+  return { output: { checked: 'cookie', cookies: checked }, findings: findings.slice(0, 15) };
+}
+"#,
+        "skill-sqli-pro" => r#"
+const F = (title, severity, rootCause, evidence, url) => ({ title, category: 'security', severity, rootCause, evidence, url, source: 'skill', ruleId: null });
+export default function (input = {}, ctx = {}) {
+  const url = input.url || ctx.url || ''; const html = input.html || ctx.html || '';
+  const params = [...new Set([...(html.match(/[?&]([a-zA-Z_][\w]{0,30})=/g)||[]).map(s=>s.slice(1,-1)), ...(html.match(/name=["']([\w]{1,30})["']/g)||[]).map(s=>s.replace(/name=["']/,'').replace(/["']$/,''))])];
+  const payloads = ["' OR '1'='1", "' OR 1=1-- -", "1; WAITFOR DELAY '0:0:5'--", "' AND SLEEP(5)-- -", "1 UNION SELECT NULL,NULL-- -", "admin'--", "' AND extractvalue(1,concat(0x7e,version()))-- -"];
+  const templates = params.slice(0, 20).map(p => ({ param: p, tests: payloads.map(x => p + '=' + encodeURIComponent(x)) }));
+  const findings = params.length ? [F('发现 ' + params.length + ' 个可注入参数面', 'medium', '存在用户可控参数，需逐一验证注入/盲注/注释截断', params.slice(0,10).join(', '), url)] : [];
+  return { output: { checked: 'sqli', params, payloads, templates }, findings };
+}
+"#,
+        "skill-idor-pro" => r#"
+const F = (title, severity, rootCause, evidence, url) => ({ title, category: 'security', severity, rootCause, evidence, url, source: 'skill', ruleId: null });
+export default function (input = {}, ctx = {}) {
+  const url = input.url || ctx.url || ''; const html = input.html || ctx.html || '';
+  const ids = [...new Set((html.match(/[?&/](id|uid|user_?id|order_?id|account|file|doc|invoice|pid)=([\w-]{1,40})/gi)||[]))];
+  const paths = [...new Set((html.match(/\/(api|user|order|account|admin|export|download)\/[\w/-]{1,60}/gi)||[]))];
+  const plan = ids.slice(0,20).map(m => ({ surface: m, tests: ['替换为相邻数字 ID（水平越权）', '替换为其他租户 ID（跨租户）', '未登录直接请求（垂直越权）', '修改 method 为 PUT/DELETE（功能级越权）'] }));
+  const findings = (ids.length || paths.length) ? [F('发现 ' + (ids.length+paths.length) + ' 处越权测试面', 'medium', '存在对象引用/敏感路径，需验证水平/垂直/跨租户越权', [...ids,...paths].slice(0,8).join(' | '), url)] : [];
+  return { output: { checked: 'idor', ids, paths, plan }, findings };
+}
+"#,
+        _ => return None,
+    })
+}
+
+/// 扩展市场目录（不自动注册，由用户一键接入）
+pub fn presets() -> Vec<Value> {
+    let mut v: Vec<Value> = json!([
+        { "id": "skill-jwt", "type": "skill", "transport": "module", "name": "JWT 安全分析技能", "version": "1.0.0", "category": "内置增强 · 零成本", "description": "解码页面/响应头中的 JWT，检测 none 算法、缺 exp、超长有效期、敏感载荷", "permissions": ["read_html"], "enabled": true, "homepage": "", "installHint": "开箱即用，无需安装" },
+        { "id": "skill-entropy", "type": "skill", "transport": "module", "name": "高熵秘钥泄露扫描技能", "version": "1.0.0", "category": "内置增强 · 零成本", "description": "识别 AWS/Google/OpenAI/GitHub/Slack 密钥、私钥与高熵随机串", "permissions": ["read_html"], "enabled": true, "homepage": "", "installHint": "开箱即用，无需安装" },
+        { "id": "skill-cors", "type": "skill", "transport": "module", "name": "CORS 配置审计技能", "version": "1.0.0", "category": "内置增强 · 零成本", "description": "检测 ACAO 通配符/null/反射来源 + 允许凭证等跨域配置错误", "permissions": ["read_html"], "enabled": true, "homepage": "", "installHint": "开箱即用，无需安装" },
+        { "id": "skill-cookie", "type": "skill", "transport": "module", "name": "Cookie 安全审计技能", "version": "1.0.0", "category": "内置增强 · 零成本", "description": "检查 Set-Cookie 是否缺少 HttpOnly / Secure / SameSite", "permissions": ["read_html"], "enabled": true, "homepage": "", "installHint": "开箱即用，无需安装" },
+        { "id": "skill-sqli-pro", "type": "skill", "transport": "module", "name": "SQL 注入载荷生成技能", "version": "1.0.0", "category": "内置增强 · 零成本", "description": "提取参数面并生成注入/盲注/注释截断/报错注入测试载荷", "permissions": ["read_html"], "enabled": true, "homepage": "", "installHint": "开箱即用，无需安装" },
+        { "id": "skill-idor-pro", "type": "skill", "transport": "module", "name": "越权（IDOR）枚举技能", "version": "1.0.0", "category": "内置增强 · 零成本", "description": "提取对象引用与敏感路径，生成水平/垂直/跨租户越权测试计划", "permissions": ["read_html"], "enabled": true, "homepage": "", "installHint": "开箱即用，无需安装" },
+        { "id": "tool-nuclei", "type": "agent", "transport": "cli", "name": "Nuclei 模板漏扫", "version": "3.x", "category": "开源工具 · 需安装", "description": "ProjectDiscovery Nuclei，基于海量 YAML 模板的漏洞扫描器", "permissions": ["scan", "network"], "enabled": false, "command": "nuclei", "args": ["-u", "{url}", "-jsonl", "-silent"], "homepage": "https://github.com/projectdiscovery/nuclei", "installHint": "安装：go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest，或下载 release 加入 PATH" },
+        { "id": "tool-sqlmap", "type": "agent", "transport": "cli", "name": "sqlmap 注入检测", "version": "1.x", "category": "开源工具 · 需安装", "description": "自动化 SQL 注入与数据库接管检测", "permissions": ["scan", "network"], "enabled": false, "command": "sqlmap", "args": ["-u", "{url}", "--batch", "--output-dir=/tmp/sqlmap"], "homepage": "https://github.com/sqlmapproject/sqlmap", "installHint": "安装：pip install sqlmap，或 git clone 后将 sqlmap.py 加入 PATH" },
+        { "id": "tool-semgrep", "type": "skill", "transport": "cli", "name": "Semgrep 代码审计", "version": "1.x", "category": "开源工具 · 需安装", "description": "静态代码分析，按规则扫描源码中的安全缺陷", "permissions": ["network"], "enabled": false, "command": "semgrep", "args": ["--config", "auto", "--json", "--quiet"], "homepage": "https://github.com/semgrep/semgrep", "installHint": "安装：pip install semgrep（需对本机源码目录运行）" },
+        { "id": "tool-nikto", "type": "agent", "transport": "cli", "name": "Nikto Web 扫描", "version": "2.x", "category": "开源工具 · 需安装", "description": "经典 Web 服务器漏洞与危险文件扫描", "permissions": ["scan", "network"], "enabled": false, "command": "nikto", "args": ["-h", "{url}", "-Format", "json"], "homepage": "https://github.com/sullo/nikto", "installHint": "安装：git clone https://github.com/sullo/nikto，perl nikto.pl 加入 PATH" },
+        { "id": "tool-trufflehog", "type": "skill", "transport": "cli", "name": "TruffleHog 秘钥挖掘", "version": "3.x", "category": "开源工具 · 需安装", "description": "在仓库/文件中深度挖掘高熵秘钥与凭证", "permissions": ["network"], "enabled": false, "command": "trufflehog", "args": ["filesystem", ".", "--json"], "homepage": "https://github.com/trufflesecurity/trufflehog", "installHint": "安装：go install github.com/trufflesecurity/trufflehog/v3@latest" },
+        { "id": "tool-gitleaks", "type": "skill", "transport": "cli", "name": "Gitleaks 秘钥扫描", "version": "8.x", "category": "开源工具 · 需安装", "description": "Git 仓库与文件中的硬编码秘钥检测", "permissions": ["network"], "enabled": false, "command": "gitleaks", "args": ["detect", "--no-git", "--report-format", "json", "--report-path", "/tmp/gitleaks.json"], "homepage": "https://github.com/gitleaks/gitleaks", "installHint": "安装：go install github.com/zricethezav/gitleaks/v8@latest" },
+        { "id": "tool-subfinder", "type": "agent", "transport": "cli", "name": "Subfinder 子域枚举", "version": "2.x", "category": "开源工具 · 需安装", "description": "被动子域名发现，扩大攻击面巡检范围", "permissions": ["scan", "network"], "enabled": false, "command": "subfinder", "args": ["-d", "{url}", "-silent"], "homepage": "https://github.com/projectdiscovery/subfinder", "installHint": "安装：go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest" },
+        { "id": "tool-zap", "type": "agent", "transport": "http", "name": "OWASP ZAP 代理扫描", "version": "2.x", "category": "开源工具 · 需安装", "description": "OWASP ZAP 守护进程，主动/被动 Web 漏洞扫描", "permissions": ["scan", "network"], "enabled": false, "endpoint": "http://127.0.0.1:8080", "homepage": "https://github.com/zaproxy/zaproxy", "installHint": "安装 ZAP 并以 daemon 模式启动：zap.sh -daemon -port 8080 -host 127.0.0.1" }
+    ]).as_array().unwrap().clone();
+    for p in v.iter_mut() {
+        let id = p["id"].as_str().unwrap_or("").to_string();
+        if p["transport"].as_str() == Some("module") {
+            p["module"] = json!(skills_dir().join(format!("{}.mjs", id)).to_string_lossy());
+        }
+        if p["config"].is_null() { p["config"] = json!({}); }
+        if p["args"].is_null() { p["args"] = json!([]); }
+    }
+    v
+}
+
+/// 一键接入市场预设：module 技能先落盘源码再注册；外部工具按配置注册（默认禁用，装好后再启用）
+pub async fn install_preset(id: &str) -> Result<Value, String> {
+    let p = presets().into_iter().find(|x| x["id"].as_str() == Some(id))
+        .ok_or_else(|| format!("预设不存在：{}", id))?;
+    if get_ext(id).is_some() {
+        return Err(format!("该扩展已接入：{}", id));
+    }
+    if p["transport"].as_str() == Some("module") {
+        let src = module_source(id).ok_or_else(|| format!("预设缺少技能源码：{}", id))?;
+        let dir = skills_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建技能目录失败：{}", e))?;
+        let path = dir.join(format!("{}.mjs", id));
+        std::fs::write(&path, src).map_err(|e| format!("写入技能源码失败：{}", e))?;
+    }
+    let mut input = p.clone();
+    input["id"] = json!(id);
+    let ext = register_ext(&input).await?;
+    Ok(json!({ "ext": ext, "installHint": p["installHint"], "homepage": p["homepage"] }))
+}
+
+/// 拖拽导入：.mjs/.js/.py 技能落盘注册为 module；.json 解析为 MCP/扩展配置注册
+pub async fn import_ext(filename: &str, content: &str) -> Result<Value, String> {
+    let name = Path::new(filename).file_name().and_then(|x| x.to_str()).unwrap_or(filename);
+    let ext = Path::new(name).extension().and_then(|x| x.to_str()).unwrap_or("").to_lowercase();
+    let stem = Path::new(name).file_stem().and_then(|x| x.to_str()).unwrap_or("imported").to_string();
+    let safe_stem: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
+    match ext.as_str() {
+        "mjs" | "js" | "cjs" | "py" => {
+            if content.trim().is_empty() { return Err("文件内容为空".into()); }
+            if content.len() > 512 * 1024 { return Err("技能文件过大（限 512KB）".into()); }
+            let dir = skills_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| format!("创建技能目录失败：{}", e))?;
+            let id = format!("skill-{}", safe_stem);
+            let fname = format!("{}.{}", id, if ext == "py" { "py" } else { "mjs" });
+            let path = dir.join(&fname);
+            std::fs::write(&path, content).map_err(|e| format!("写入技能失败：{}", e))?;
+            let input = json!({
+                "id": id, "type": "skill", "transport": "module",
+                "name": format!("导入技能 · {}", stem), "version": "0.1.0",
+                "description": format!("从 {} 拖拽导入的本地技能", name),
+                "module": path.to_string_lossy(), "permissions": ["read_html"], "enabled": true,
+            });
+            let ext = register_ext(&input).await?;
+            Ok(json!({ "ext": ext, "kind": "module" }))
+        }
+        "json" => {
+            let v: Value = serde_json::from_str(content).map_err(|_| "JSON 配置解析失败".to_string())?;
+            // 支持 {mcpServers:{name:{command,args}}} 或单个扩展配置
+            let cfg = if v["mcpServers"].is_object() {
+                let (k, val) = v["mcpServers"].as_object().unwrap().iter().next().ok_or("mcpServers 为空")?;
+                let mut c = val.clone();
+                if c["id"].is_null() { c["id"] = json!(format!("mcp-{}", k)); }
+                if c["name"].is_null() { c["name"] = json!(k); }
+                if c["type"].is_null() { c["type"] = json!("mcp"); }
+                if c["transport"].is_null() { c["transport"] = json!(if c["command"].is_null() { "http" } else { "stdio" }); }
+                if c["permissions"].is_null() { c["permissions"] = json!(["mcp", "network"]); }
+                c
+            } else { v };
+            let ext = register_ext(&cfg).await?;
+            Ok(json!({ "ext": ext, "kind": "config" }))
+        }
+        _ => Err("仅支持 .mjs/.js/.py 技能文件或 .json 扩展/MCP 配置".into()),
+    }
+}
+
+fn extract_obj(content: &str) -> Option<Value> {
+    let cleaned = content.replace("```json", "").replace("```", "");
+    let st = cleaned.find('{')?;
+    let en = cleaned.rfind('}')?;
+    if en <= st { return None; }
+    serde_json::from_str(&cleaned[st..=en]).ok()
+}
+
+/// AI 对话添加扩展：描述需求 → 生成扩展配置草稿（命中市场预设则直接返回；否则调用大模型）
+pub async fn ai_compose_ext(client: &reqwest::Client, prompt: &str) -> Result<Value, String> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() { return Err("请描述你想添加的扩展".into()); }
+    let lower = prompt.to_lowercase();
+    // 关键词命中市场预设（零成本可用）
+    for p in presets() {
+        let id = p["id"].as_str().unwrap_or("");
+        let name = p["name"].as_str().unwrap_or("").to_lowercase();
+        let key = id.trim_start_matches("tool-").trim_start_matches("skill-");
+        if lower.contains(key) || lower.contains(&name) || (key == "jwt" && lower.contains("jwt")) {
+            return Ok(json!({ "draft": p, "source": "preset", "explanation": format!("已匹配开源扩展「{}」，可直接接入。{}", p["name"], p["installHint"]) }));
+        }
+    }
+    let c = load_config();
+    if !c.enabled {
+        return Err("未匹配到内置预设。请先在「AI 设置」启用 AI 增强，或用更具体的工具名（如 nuclei / sqlmap / jwt）".into());
+    }
+    let catalog: Vec<String> = presets().iter().map(|p| format!("- {}（{}）：{}", p["id"], p["type"], p["description"])).collect();
+    let system = "你是 Web 安全扩展配置助手。根据用户需求生成一个扩展注册配置 JSON（只输出 JSON 对象，不要其它文字）。\n字段：type(agent/skill/mcp/bot), transport(http/openai/module/stdio/cli), name, description, endpoint(http/openai), command+args(stdio/cli), permissions(从 scan/network/llm/read_html/mcp/notify 选), config(对象)。\n优先复用以下开源预设：\n".to_string() + &catalog.join("\n");
+    let r = chat(client, json!([
+        { "role": "system", "content": system },
+        { "role": "user", "content": trunc(prompt, 2000) },
+    ]), ChatOpts { config: Some(c), max_tokens: 1200, ..Default::default() }).await?;
+    let draft = extract_obj(&r.content).ok_or("模型输出无法解析为扩展配置，请重试或换模型")?;
+    Ok(json!({ "draft": draft, "source": "ai", "model": r.model, "explanation": "AI 已生成扩展配置草稿，请核对后注册。" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_valid_and_module_sources_present() {
+        let ps = presets();
+        assert!(ps.len() >= 12);
+        for p in &ps {
+            assert!(TYPES.contains(&p["type"].as_str().unwrap_or("")));
+            assert!(TRANSPORTS.contains(&p["transport"].as_str().unwrap_or("")));
+            for perm in p["permissions"].as_array().unwrap() {
+                assert!(PERMISSIONS.contains(&perm.as_str().unwrap_or("")));
+            }
+            if p["transport"].as_str() == Some("module") {
+                assert!(module_source(p["id"].as_str().unwrap_or("")).is_some());
+                assert!(p["module"].as_str().unwrap_or("").ends_with(".mjs"));
+            }
+            if p["transport"].as_str() == Some("cli") {
+                assert!(!p["command"].as_str().unwrap_or("").is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ai_compose_ext_matches_preset_without_ai() {
+        let client = reqwest::Client::new();
+        let r = ai_compose_ext(&client, "帮我接入 nuclei 漏扫").await.unwrap();
+        assert_eq!(r["source"], "preset");
+        assert_eq!(r["draft"]["id"], "tool-nuclei");
+        let r2 = ai_compose_ext(&client, "分析 jwt 令牌").await.unwrap();
+        assert_eq!(r2["draft"]["id"], "skill-jwt");
+    }
+
+    #[test]
+    fn extract_obj_parses_fenced_json() {
+        let v = extract_obj("```json\n{\"type\":\"skill\",\"name\":\"x\"}\n```").unwrap();
+        assert_eq!(v["type"], "skill");
+        assert!(extract_obj("no json here").is_none());
+    }
 }

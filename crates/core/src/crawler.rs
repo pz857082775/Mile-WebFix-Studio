@@ -120,7 +120,7 @@ async fn run(follow: &Client, manual: &Client, job: &SharedJob) -> Result<(), St
             break;
         }
         let Some((url, depth)) = queue.pop_front() else { break };
-        match scan_target(follow, manual, &url, ScanOpts { probe_paths: false }).await {
+        match scan_target(follow, manual, &url, ScanOpts { probe_paths: false, discover: depth == 0 }).await {
             Ok(result) => {
                 let findings = result["findings"].as_array().cloned().unwrap_or_default();
                 let links = result["links"].as_array().cloned().unwrap_or_default();

@@ -200,10 +200,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ext/remove", post(ext_remove))
         .route("/api/ext/discover", post(ext_discover))
         .route("/api/ext/invoke", post(ext_invoke))
+        .route("/api/ext/presets", get(ext_presets))
+        .route("/api/ext/install-preset", post(ext_install_preset))
+        .route("/api/ext/import", post(ext_import))
+        .route("/api/ext/ai-compose", post(ext_ai_compose))
         .route("/api/audit", get(api_audit))
         .route("/api/orch/pipelines", get(|| async { json_ok(json!({ "pipelines": orchestrator::list_pipelines() })) }))
         .route("/api/orch/pipeline", post(orch_pipeline_save))
         .route("/api/orch/pipeline/remove", post(orch_pipeline_remove))
+        .route("/api/orch/ai-compose", post(orch_ai_compose))
         .route("/api/orch/run", post(orch_run))
         .route("/api/orch/run-status", get(orch_run_status))
         .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024));
@@ -254,7 +259,8 @@ async fn api_scan(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let url = match auth_gate(v["url"].as_str(), v["authorized"].as_bool().unwrap_or(false)) {
         Ok(u) => u, Err(r) => return r,
     };
-    let opts = ScanOpts { probe_paths: v["probePaths"].as_bool().unwrap_or(false) };
+    let probe = v["probePaths"].as_bool().unwrap_or(false);
+    let opts = ScanOpts { probe_paths: probe, discover: v["discover"].as_bool().unwrap_or(probe) };
     match scanner::scan_target(&state.follow, &state.manual, url.as_str(), opts).await {
         Ok(r) => json_ok(scanner::with_summary(r)),
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
@@ -300,13 +306,18 @@ async fn api_inspect_start(State(state): State<Arc<AppState>>, body: Bytes) -> R
     state.sessions.lock().await.insert(sid.clone(), crate::Session {
         events: vec![], created_at: now_ms(), target: Some(url.to_string()),
     });
-    json_ok(json!({
+    let mut resp = json_ok(json!({
         "sid": sid,
         "token": token,
         "proxyUrl": proxy_url,
         "cookieName": format!("{}sid", proxy::cookie_prefix(&token)),
         "cookiePath": format!("/proxy/{}", token),
-    }))
+    }));
+    // 干净路径回退用：SPA 整页跳转 / 外部 CSS 图片等未走代理前缀的请求据此转发到目标站
+    if let Ok(c) = format!("wf_target={}; Path=/; SameSite=Lax", token).parse() {
+        resp.headers_mut().insert(header::SET_COOKIE, c);
+    }
+    resp
 }
 
 async fn api_capture(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
@@ -417,8 +428,14 @@ async fn ai_config_post(body: Bytes) -> Response {
     json_ok(json!({ "config": crate::ai::public_config() }))
 }
 
-async fn ai_test(State(state): State<Arc<AppState>>) -> Response {
-    match crate::ai::test_connection(&state.manual).await {
+async fn ai_test(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    let mut cfg = crate::ai::load_config();
+    if let Some(b) = v["baseUrl"].as_str() { let b = b.trim(); if !b.is_empty() { cfg.base_url = b.to_string(); } }
+    if let Some(m) = v["model"].as_str() { let m = m.trim(); if !m.is_empty() { cfg.model = m.to_string(); } }
+    if let Some(p) = v["provider"].as_str() { let p = p.trim(); if !p.is_empty() { cfg.provider = p.to_string(); } }
+    if let Some(k) = v["apiKey"].as_str() { let k = k.trim(); if !k.is_empty() { cfg.api_key = k.to_string(); } }
+    match crate::ai::test_connection(&state.manual, cfg).await {
         Ok(r) => json_ok(r),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
     }
@@ -510,6 +527,36 @@ async fn api_audit(Query(q): Query<HashMap<String, String>>) -> Response {
     json_ok(json!({ "entries": read_audit(limit) }))
 }
 
+async fn ext_presets() -> Response {
+    json_ok(json!({ "presets": extensions::presets() }))
+}
+
+async fn ext_install_preset(body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    match extensions::install_preset(v["id"].as_str().unwrap_or("")).await {
+        Ok(r) => json_ok(r),
+        Err(e) => json_err(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn ext_import(body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    let filename = v["filename"].as_str().unwrap_or("");
+    let content = v["content"].as_str().unwrap_or("");
+    match extensions::import_ext(filename, content).await {
+        Ok(r) => json_ok(r),
+        Err(e) => json_err(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn ext_ai_compose(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    match extensions::ai_compose_ext(&state.follow, v["prompt"].as_str().unwrap_or("")).await {
+        Ok(r) => json_ok(r),
+        Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
 // ---- 协同编排 ----
 async fn orch_pipeline_save(body: Bytes) -> Response {
     let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
@@ -524,6 +571,14 @@ async fn orch_pipeline_remove(body: Bytes) -> Response {
     match orchestrator::remove_pipeline(v["id"].as_str().unwrap_or("")) {
         Ok(r) => json_ok(r),
         Err(e) => json_err(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+async fn orch_ai_compose(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    match orchestrator::ai_compose_pipeline(&state.follow, v["prompt"].as_str().unwrap_or("")).await {
+        Ok(r) => json_ok(r),
+        Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
     }
 }
 
@@ -554,20 +609,42 @@ async fn orch_run_status(State(state): State<Arc<AppState>>, Query(q): Query<Has
 }
 
 // ---- 静态资源（SPA + capture-hook.js / ai-pilot.js）----
-async fn static_handler(req: axum::extract::Request) -> Response {
+fn wf_target_token(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())?;
+    for part in cookie.split(';') {
+        if let Some(rest) = part.trim().strip_prefix("wf_target=") {
+            if !rest.is_empty() { return Some(rest.to_string()); }
+        }
+    }
+    None
+}
+
+async fn static_handler(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
     let method = req.method().clone();
     if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
         return json_err(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
     }
-    let path = req.uri().path();
-    let rel = if path == "/" { "index.html" } else { path.trim_start_matches('/') };
+    let path = req.uri().path().to_string();
+    let rel = if path == "/" { "index.html".to_string() } else { path.trim_start_matches('/').to_string() };
     if rel.split('/').any(|seg| seg == "..") {
         return json_err(StatusCode::FORBIDDEN, "forbidden");
     }
-    let Some(file) = Assets::get(rel) else {
+    let Some(file) = Assets::get(&rel) else {
+        // 巡检干净路径回退：未命中本地资源且带 wf_target cookie → 转发到目标站
+        // （支持 SPA 整页跳转 / 刷新 / 外部 CSS 图片等未带代理前缀的请求）
+        if let Some(token) = wf_target_token(req.headers()) {
+            let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
+            let new_uri = format!("/proxy/{}{}{}", token, path, query);
+            let (mut parts, body) = req.into_parts();
+            if let Ok(u) = new_uri.parse() {
+                parts.uri = u;
+                let req2 = axum::extract::Request::from_parts(parts, body);
+                return proxy::handle_proxy(&state, req2).await;
+            }
+        }
         return json_err(StatusCode::NOT_FOUND, "not found");
     };
-    let mime = mime_guess::from_path(rel).first_raw().unwrap_or("application/octet-stream");
+    let mime = mime_guess::from_path(&rel).first_raw().unwrap_or("application/octet-stream");
     let mime = if mime.starts_with("text/") || mime == "application/javascript" {
         format!("{}; charset=utf-8", mime)
     } else {
