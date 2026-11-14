@@ -7,6 +7,22 @@
   var sid = q.get('sid') || '';
   var prefix = '/proxy/' + token;
 
+  // 关键：让 SPA 前端路由看到「干净路径」。代理用 /proxy/<token>/xxx 前缀转发，
+  // 但 react-router/vue-router 按 location.pathname 匹配路由，带前缀会匹配不到任何
+  // 路由 → 主内容不渲染（黑屏）。这里在应用模块启动前同步去掉前缀，资源/接口仍走代理。
+  function cleanUrl(url) {
+    if (!url) return url;
+    var s = String(url);
+    if (s.indexOf('/proxy/') === 0) return s.replace(/^\/proxy\/[^/]+/, '') || '/';
+    return s;
+  }
+  try {
+    var cleanPath = location.pathname.replace(/^\/proxy\/[^/]+/, '') || '/';
+    if (cleanPath !== location.pathname) {
+      history.replaceState(history.state, '', cleanPath + location.search + location.hash);
+    }
+  } catch (e) { /* 忽略 */ }
+
   function b64url(s) {
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
@@ -139,11 +155,11 @@
     return origWindowOpen.apply(this, [url ? proxify(String(url)) : url].concat(rest));
   };
 
-  // ---- SPA 路由与动态 DOM 链接重写 ----
+  // ---- SPA 路由：保持干净路径（去前缀），让前端路由正常匹配;资源/接口由 proxify 走代理 ----
   ['pushState', 'replaceState'].forEach(function (fn) {
     var orig = history[fn].bind(history);
     history[fn] = function (s, t, url) {
-      return orig(s, t, url ? proxify(String(url)) : url);
+      return orig(s, t, url ? cleanUrl(String(url)) : url);
     };
   });
 

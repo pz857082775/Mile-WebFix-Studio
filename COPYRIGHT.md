@@ -1,6 +1,6 @@
 # 版权说明 · COPYRIGHT NOTICE
 
-**WebFix Studio** · 版本 v1.0.0
+**WebFix Studio** · 版本 v1.1.0
 
 Copyright © 米乐（Mi Le）. 保留所有权利。All Rights Reserved.
 
@@ -11,7 +11,7 @@ Copyright © 米乐（Mi Le）. 保留所有权利。All Rights Reserved.
 | 作者 / 版权人 | 米乐 |
 | 微信 | mileai8 |
 | 邮箱 | 857082775@qq.com |
-| 版本号 | 1.0.0 |
+| 版本号 | 1.1.0 |
 
 ## 权利范围
 
@@ -48,4 +48,4 @@ Copyright © 米乐（Mi Le）. 保留所有权利。All Rights Reserved.
 
 ---
 
-© 米乐 · WebFix Studio v1.0.0 · 微信 mileai8 · 857082775@qq.com
+© 米乐 · WebFix Studio v1.1.0 · 微信 mileai8 · 857082775@qq.com

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-1677ff" alt="version" />
+  <img src="https://img.shields.io/badge/version-1.1.0-1677ff" alt="version" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Web-00b42a" alt="platform" />
   <img src="https://img.shields.io/badge/Rust-axum-dea584" alt="rust" />
   <img src="https://img.shields.io/badge/React-18%20%2B%20TS%20%2B%20Tailwind-61dafb" alt="react" />
@@ -57,9 +57,9 @@ OWASP Top10 / API Top10 / CWE Top25 / 逻辑 / 数据 / 算法 的安全规则�
 
 | 形态 | 文件 | 说明 |
 | --- | --- | --- |
-| 桌面 · 安装版 | [`WebFixStudio-1.0.0-x64-setup.exe`](release/desktop/WebFixStudio-1.0.0-x64-setup.exe) | NSIS 安装包（推荐） |
-| 桌面 · 安装版 | [`WebFixStudio-1.0.0-x64.msi`](release/desktop/WebFixStudio-1.0.0-x64.msi) | MSI 安装包 |
-| 桌面 · 便携版 | [`WebFixStudio-1.0.0-x64-portable.exe`](release/desktop/WebFixStudio-1.0.0-x64-portable.exe) | 免安装，双击运行 |
+| 桌面 · 安装版 | [`WebFixStudio-1.1.0-x64-setup.exe`](release/desktop/WebFixStudio-1.1.0-x64-setup.exe) | NSIS 安装包（推荐） |
+| 桌面 · 安装版 | [`WebFixStudio-1.1.0-x64.msi`](release/desktop/WebFixStudio-1.1.0-x64.msi) | MSI 安装包 |
+| 桌面 · 便携版 | [`WebFixStudio-1.1.0-x64-portable.exe`](release/desktop/WebFixStudio-1.1.0-x64-portable.exe) | 免安装，双击运行 |
 | 网页 · 单文件 | [`webfix-server.exe`](release/web/webfix-server.exe) | 双击后浏览器打开 `http://127.0.0.1:8787` |
 
 内置演示靶场 `/demo`（含登录墙 `/demo/admin`），开箱即可体验全部功能。
@@ -100,23 +100,24 @@ cd crates/desktop && cargo tauri build
 ## 🔒 安全与隐私
 
 1. **授权扫描**：仅可扫描自有或已获授权的网站（内置授权勾选，localhost 豁免）。
-2. **密钥本地化**：AI 密钥仅存本机 `~/.webfix-studio/ai-config.json`，只发往你配置的 API 地址。
+2. **密钥本地化**：AI 密钥仅存本机系统用户目录（Windows `%APPDATA%\WebFixStudio`），只发往你配置的 API 地址。
 3. **零成本硬隔离**：零成本模式由服务端强制不联网大模型，绝不产生费用。
 4. **扩展沙箱**：模块 SKILL 限定目录、编排条件禁用 eval、外部端点校验 http(s)。
+5. **配置持久化**：AI / 扩展 / 编排 / 审计 / 技能统一保存于系统每用户应用数据目录，重装 / 升级自动迁移旧配置，无需重新配置。
 
 ## © 版权与联系
 
-> **Copyright © 米乐 · v1.0.0 · 保留所有权利。**
+> **Copyright © 米乐 · v1.1.0 · 保留所有权利。**
 >
 > - 作者：**米乐**
 > - 微信：**mileai8**
 > - 邮箱：**857082775@qq.com**
-> - 版本：**1.0.0**
+> - 版本：**1.1.0**
 >
 > 本软件（含源码、界面、知识库、图标与交付物）版权归 **米乐** 所有。
 > 未经书面许可，不得用于商业再分发或去除版权标识。详见 [`COPYRIGHT.md`](COPYRIGHT.md)。
 
 <p align="center">
   <img src="assets/logo.png" width="48" alt="logo" /><br/>
-  <sub>© 米乐 · WebFix Studio v1.0.0 · 微信 mileai8 · 857082775@qq.com</sub>
+  <sub>© 米乐 · WebFix Studio v1.1.0 · 微信 mileai8 · 857082775@qq.com</sub>
 </p>

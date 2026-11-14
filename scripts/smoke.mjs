@@ -23,6 +23,11 @@ console.log('== 基础 ==');
   ok('health', r.status === 200 && r.data.ok === true);
 }
 {
+  const r = await j('/api/meta');
+  ok('meta version', r.status === 200 && r.data.version === '1.1.0', JSON.stringify(r.data));
+  ok('meta configDir 持久化路径', typeof r.data.configDir === 'string' && r.data.configDir.length > 0, r.data.configDir);
+}
+{
   const r = await fetch(BASE + '/demo');
   const html = await r.text();
   ok('demo home', r.status === 200 && html.includes('演示靶场') && html.includes('id="main"'));

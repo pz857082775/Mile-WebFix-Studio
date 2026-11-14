@@ -66,6 +66,8 @@ pub fn origin_of(u: &Url) -> Option<String> {
     Some(u.origin().ascii_serialization())
 }
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub fn home_dir() -> std::path::PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -73,6 +75,63 @@ pub fn home_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-pub fn config_dir() -> std::path::PathBuf {
+/// 系统级每用户应用数据目录（重装 / 升级不丢失配置）：
+/// Windows `%APPDATA%\WebFixStudio`；macOS `~/Library/Application Support/WebFixStudio`；Linux `$XDG_CONFIG_HOME/WebFixStudio`
+fn app_data_dir() -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        if let Some(v) = std::env::var_os("APPDATA") {
+            return std::path::PathBuf::from(v).join("WebFixStudio");
+        }
+    } else if cfg!(target_os = "macos") {
+        return home_dir().join("Library").join("Application Support").join("WebFixStudio");
+    } else if let Some(v) = std::env::var_os("XDG_CONFIG_HOME") {
+        return std::path::PathBuf::from(v).join("WebFixStudio");
+    } else {
+        return home_dir().join(".config").join("WebFixStudio");
+    }
     home_dir().join(".webfix-studio")
+}
+
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let p = e.path();
+        let d = dst.join(e.file_name());
+        if p.is_dir() {
+            copy_dir(&p, &d)?;
+        } else {
+            std::fs::copy(&p, &d)?;
+        }
+    }
+    Ok(())
+}
+
+/// 首启把旧版 `~/.webfix-studio` 配置迁移到系统应用数据目录（保留旧目录作备份，不覆盖已有文件）
+fn migrate_legacy(dir: &std::path::Path) {
+    let legacy = home_dir().join(".webfix-studio");
+    if legacy == dir || !legacy.is_dir() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(dir);
+    let Ok(rd) = std::fs::read_dir(&legacy) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        let dest = dir.join(e.file_name());
+        if dest.exists() {
+            continue;
+        }
+        if p.is_dir() {
+            let _ = copy_dir(&p, &dest);
+        } else {
+            let _ = std::fs::copy(&p, &dest);
+        }
+    }
+}
+
+pub fn config_dir() -> std::path::PathBuf {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    let dir = app_data_dir();
+    INIT.call_once(|| migrate_legacy(&dir));
+    dir
 }

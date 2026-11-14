@@ -14,7 +14,7 @@ export function StatusBar({ active, tabCount, ruleCount }: { active: PageId | nu
       <span className="w-px h-3 bg-line" />
       <span>规则 {ruleCount} 条</span>
       <span className="w-px h-3 bg-line" />
-      <span>© 米乐 · v1.0.0 · 微信 mileai8</span>
+      <span>© 米乐 · v1.1.0 · 微信 mileai8</span>
     </footer>
   );
 }

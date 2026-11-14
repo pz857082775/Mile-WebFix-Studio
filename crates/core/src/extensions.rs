@@ -407,7 +407,7 @@ pub async fn mcp_discover(client: &reqwest::Client, ext: &Value) -> Result<Value
     check_permission(ext)?;
     let _ = mcp_call(client, ext, "initialize", json!({
         "protocolVersion": "2024-11-05", "capabilities": {},
-        "clientInfo": { "name": "webfix-studio", "version": "1.0.0" }
+        "clientInfo": { "name": "webfix-studio", "version": crate::util::VERSION }
     })).await;
     let r = mcp_call(client, ext, "tools/list", json!({})).await?;
     let tools: Vec<Value> = r["tools"].as_array().map(|a| {

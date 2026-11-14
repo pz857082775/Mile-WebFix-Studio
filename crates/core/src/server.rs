@@ -176,6 +176,13 @@ fn auth_gate(url: Option<&str>, authorized: bool) -> Result<Url, Response> {
 pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
         .route("/api/health", get(|| async { json_ok(json!({ "ok": true })) }))
+        .route("/api/meta", get(|| async {
+            json_ok(json!({
+                "version": crate::util::VERSION,
+                "configDir": crate::util::config_dir().to_string_lossy(),
+                "platform": std::env::consts::OS,
+            }))
+        }))
         .route("/api/scan", post(api_scan))
         .route("/api/crawl", post(api_crawl))
         .route("/api/crawl-status", get(api_crawl_status))
