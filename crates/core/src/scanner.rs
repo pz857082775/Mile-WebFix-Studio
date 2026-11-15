@@ -69,6 +69,16 @@ re!(re_graphql, r#"(?i)__schema|queryType"#);
 re!(re_hidden_input, r#"(?i)<input\b[^>]*type\s*=\s*["']?hidden[^>]*>"#);
 re!(re_route_path, r#"(?:path|to|href|route|redirect|navigate|url)\s*[:=(]\s*["'](/[A-Za-z0-9_\-/:{}$.]{1,60})["']"#);
 re!(re_route_str, r#"["'](/[a-z][A-Za-z0-9_\-/]{1,40})["']"#);
+re!(re_img_src, r#"(?i)<img\b[^>]*\ssrc\s*=\s*["']([^"']+)["']"#);
+re!(re_link_css, r#"(?i)<link\b[^>]*\shref\s*=\s*["']([^"']+)["'][^>]*>"#);
+re!(re_redirect_js, r#"(?i)location\.href\s*=|window\.location\s*=|http-equiv\s*=\s*["']?refresh"#);
+re!(re_sitemap_loc, r#"(?i)<loc>\s*([^<\s]+)\s*</loc>"#);
+
+/// 反射 XSS 探测 canary（无害标记，仅检测是否被原样反射，不执行任何脚本）
+const XSS_CANARY: &str = "wf7f3a\"><i>";
+const REDIRECT_CANARY: &str = "https://example.com/wf-od";
+const REDIRECT_PARAMS: &[&str] = &["url", "redirect", "redirect_url", "redirect_uri", "next", "return", "returnto", "return_url", "target", "goto", "continue", "dest", "destination", "jump", "rurl"];
+const TRAVERSAL_PARAMS: &[&str] = &["file", "path", "page", "doc", "document", "template", "include", "load", "filename", "filepath", "dir", "folder"];
 
 fn matches(r: &Regex, s: &str) -> Vec<String> {
     r.find_iter(s).map(|m| m.as_str().to_string()).collect()
@@ -394,6 +404,47 @@ pub async fn discover_routes(html: &str, base_url: &str, follow: &Client, manual
     (links, findings)
 }
 
+/// 智能路由发现：起始页 + 页内同源链接 + robots/JS 前端路由 + sitemap.xml，
+/// 去重归一后返回可供「逐页深度探测」遍历的路由清单（含起始页本身）。
+pub async fn discover_all_routes(follow: &Client, manual: &Client, url_href: &str) -> Vec<String> {
+    let Ok(base) = Url::parse(url_href) else { return vec![] };
+    let Some(origin) = origin_of(&base) else { return vec![] };
+    let mut routes: Vec<String> = Vec::new();
+    let push = |u: Url, routes: &mut Vec<String>| {
+        if origin_of(&u).as_deref() != Some(origin.as_str()) { return; }
+        if u.scheme() != "http" && u.scheme() != "https" { return; }
+        let mut u = u;
+        u.set_fragment(None);
+        if re_asset_ext().is_match(u.path()) { return; }
+        let s = u.to_string();
+        if !routes.contains(&s) { routes.push(s); }
+    };
+
+    push(base.clone(), &mut routes);
+
+    if let Ok(r) = follow.get(base.as_str()).timeout(Duration::from_secs(12)).header("User-Agent", UA).send().await {
+        let final_url = r.url().to_string();
+        let text = r.text().await.unwrap_or_default();
+        for l in extract_links(&text, &final_url) {
+            if let Ok(u) = Url::parse(&l) { push(u, &mut routes); }
+        }
+        let (extra, _) = discover_routes(&text, &final_url, follow, manual).await;
+        for l in extra { if let Ok(u) = Url::parse(&l) { push(u, &mut routes); } }
+    }
+
+    if let Ok(r) = manual.get(format!("{}/sitemap.xml", origin)).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+        if r.status().is_success() {
+            let xml = r.text().await.unwrap_or_default();
+            for c in re_sitemap_loc().captures_iter(&xml) {
+                if let Ok(u) = Url::parse(&c[1]) { push(u, &mut routes); }
+            }
+        }
+    }
+
+    routes.truncate(60);
+    routes
+}
+
 fn set_cookies(headers: &HeaderMap) -> Vec<String> {
     headers.get_all(SET_COOKIE).iter().filter_map(|v| v.to_str().ok().map(String::from)).collect()
 }
@@ -492,6 +543,134 @@ pub struct ScanOpts {
     pub probe_paths: bool,
     /// 发现 SPA 前端路由（robots.txt + JS 包），用于全站爬行覆盖每个界面
     pub discover: bool,
+    /// 主动无害漏洞探测（反射 XSS / SQLi 报错 / 开放重定向 / 路径遍历 / CORS 反射）
+    pub active: bool,
+    /// 链接 / 资源健康检查（死链、坏图、坏脚本样式）
+    pub assets: bool,
+}
+
+impl Default for ScanOpts {
+    fn default() -> Self {
+        ScanOpts { probe_paths: false, discover: false, active: false, assets: false }
+    }
+}
+
+fn with_param(url: &Url, pairs: &[(String, String)], name: &str, value: &str) -> Url {
+    let mut u = url.clone();
+    u.query_pairs_mut().clear().extend_pairs(
+        pairs.iter().map(|(k, v)| (k.as_str(), if k == name { value } else { v.as_str() })),
+    );
+    u
+}
+
+/// 主动无害漏洞探测：仅发送带 canary 的 GET，不提交表单、不写数据、不执行脚本。
+/// 反射 XSS / SQLi 报错 / 开放重定向 / 路径遍历 / CORS 反射。
+pub async fn probe_active(manual: &Client, url_href: &str) -> Vec<Value> {
+    let mut raw: Vec<Value> = Vec::new();
+    let Ok(url) = Url::parse(url_href) else { return raw };
+    let pairs: Vec<(String, String)> = url.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    let names: Vec<String> = {
+        let mut n: Vec<String> = Vec::new();
+        for (k, _) in &pairs { if !n.contains(k) { n.push(k.clone()); } }
+        n.truncate(4);
+        n
+    };
+
+    // CORS 反射：发送任意 Origin，看是否被原样回显
+    if let Ok(r) = manual.get(url.as_str()).timeout(Duration::from_secs(6))
+        .header("User-Agent", UA).header("Origin", "https://wf-cors-test.example").send().await
+    {
+        let acao = hget(r.headers(), "access-control-allow-origin").unwrap_or("").to_string();
+        let acac = hget(r.headers(), "access-control-allow-credentials").unwrap_or("").to_string();
+        if acao == "https://wf-cors-test.example" || (acao == "*" && acac.eq_ignore_ascii_case("true")) {
+            raw.push(json!({ "ruleId": "sec-cors-reflect", "evidence": format!("Access-Control-Allow-Origin 回显任意 Origin（{}），可被跨域读取", acao) }));
+        }
+    }
+
+    for name in &names {
+        let orig = pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).unwrap_or_default();
+        // 反射 XSS：canary 原样（未转义）出现在响应中
+        let xu = with_param(&url, &pairs, name, XSS_CANARY);
+        if let Ok(r) = manual.get(xu.as_str()).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+            if r.status().is_success() {
+                let body = r.text().await.unwrap_or_default();
+                if body.contains(XSS_CANARY) {
+                    raw.push(json!({ "ruleId": "sec-xss-reflected", "evidence": format!("参数 {} 的输入被未转义反射到响应（canary 原样回显）", name) }));
+                }
+            }
+        }
+        // SQLi 报错：追加单引号触发数据库报错泄露
+        let su = with_param(&url, &pairs, name, &format!("{}'", orig));
+        if let Ok(r) = manual.get(su.as_str()).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+            let body = r.text().await.unwrap_or_default();
+            if let Some(m) = re_sqlerr().find(&body) {
+                raw.push(json!({ "ruleId": "sec-sqli-error-based", "evidence": format!("参数 {} 追加单引号触发数据库报错：{}", name, trunc(m.as_str(), 80)) }));
+            }
+        }
+        // 开放重定向
+        if REDIRECT_PARAMS.iter().any(|p| p.eq_ignore_ascii_case(name)) {
+            let ru = with_param(&url, &pairs, name, REDIRECT_CANARY);
+            if let Ok(r) = manual.get(ru.as_str()).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+                let loc = hget(r.headers(), "location").unwrap_or("").to_string();
+                let body = r.text().await.unwrap_or_default();
+                if loc.starts_with(REDIRECT_CANARY) || (body.contains(REDIRECT_CANARY) && re_redirect_js().is_match(&body)) {
+                    raw.push(json!({ "ruleId": "sec-open-redirect", "evidence": format!("参数 {} 可控制跳转目标到外部域（{}）", name, REDIRECT_CANARY) }));
+                }
+            }
+        }
+        // 路径遍历
+        if TRAVERSAL_PARAMS.iter().any(|p| p.eq_ignore_ascii_case(name)) {
+            let tu = with_param(&url, &pairs, name, "../../../../etc/passwd");
+            if let Ok(r) = manual.get(tu.as_str()).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+                let body = r.text().await.unwrap_or_default();
+                if body.contains("root:") || body.contains("[boot loader]") || body.contains("[fonts]") {
+                    raw.push(json!({ "ruleId": "sec-path-traversal", "evidence": format!("参数 {} 可读取服务器本地文件（../../ 穿越命中）", name) }));
+                }
+            }
+        }
+    }
+    raw
+}
+
+/// 链接 / 资源健康检查：同源页面死链 + 图片/脚本/样式坏链（真实功能性 BUG）
+pub async fn probe_links(client: &Client, base_url: &str, html: &str, page_links: &[String]) -> Vec<Value> {
+    let mut raw: Vec<Value> = Vec::new();
+    let Ok(base) = Url::parse(base_url) else { return raw };
+    let Some(origin) = origin_of(&base) else { return raw };
+
+    let mut assets: Vec<String> = Vec::new();
+    let push_asset = |s: &str, assets: &mut Vec<String>| {
+        if s.is_empty() || s.starts_with("data:") { return; }
+        let Ok(u) = base.join(s) else { return };
+        if origin_of(&u).as_deref() != Some(origin.as_str()) { return; }
+        let href = u.to_string();
+        if !assets.contains(&href) { assets.push(href); }
+    };
+    for c in re_img_src().captures_iter(html) { push_asset(&c[1], &mut assets); }
+    for c in re_script_src().captures_iter(html) { push_asset(&c[1], &mut assets); }
+    for c in re_link_css().captures_iter(html) { push_asset(&c[1], &mut assets); }
+    assets.truncate(12);
+    for a in &assets {
+        match client.get(a).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+            Ok(r) if r.status().as_u16() >= 400 => {
+                raw.push(json!({ "ruleId": "func-resource-error", "evidence": format!("资源 HTTP {}：{}", r.status().as_u16(), a) }));
+            }
+            Err(_) => raw.push(json!({ "ruleId": "func-resource-error", "evidence": format!("资源无法加载：{}", a) })),
+            _ => {}
+        }
+    }
+
+    let mut checked = 0;
+    for l in page_links {
+        if checked >= 8 { break; }
+        checked += 1;
+        if let Ok(r) = client.get(l).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+            if r.status().as_u16() >= 400 {
+                raw.push(json!({ "ruleId": "func-http-error", "evidence": format!("死链 HTTP {}：{}", r.status().as_u16(), l) }));
+            }
+        }
+    }
+    raw
 }
 
 /// 单页体检（与 JS scanTarget 输出结构一致）
@@ -535,6 +714,7 @@ pub async fn scan_target(follow: &Client, manual: &Client, raw_url: &str, opts: 
     raw.extend(scan_headers(&headers, url.as_str(), &cookies));
     raw.extend(scan_html(&html, url.as_str()));
 
+    let page_links = extract_links(&html, &final_url);
     let mut extra_links: Vec<String> = Vec::new();
     if opts.discover {
         let (el, jf) = discover_routes(&html, &final_url, follow, manual).await;
@@ -553,6 +733,17 @@ pub async fn scan_target(follow: &Client, manual: &Client, raw_url: &str, opts: 
         raw.extend(extra);
     }
 
+    if opts.active {
+        let active = tokio::time::timeout(Duration::from_secs(20), probe_active(manual, url.as_str()))
+            .await.unwrap_or_default();
+        raw.extend(active);
+    }
+    if opts.assets {
+        let health = tokio::time::timeout(Duration::from_secs(20), probe_links(follow, &final_url, &html, &page_links))
+            .await.unwrap_or_default();
+        raw.extend(health);
+    }
+
     // 按 ruleId 合并证据
     let mut merged: Vec<Value> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
@@ -569,7 +760,7 @@ pub async fn scan_target(follow: &Client, manual: &Client, raw_url: &str, opts: 
     }
 
     let findings = enrich_findings(&merged);
-    let mut links = extract_links(&html, &final_url);
+    let mut links = page_links;
     for l in extra_links { if !links.contains(&l) { links.push(l); } }
     let mut hmap = Map::new();
     for (k, v) in headers.iter() {

@@ -50,6 +50,15 @@ export interface ScanResult {
   summary: Summary;
 }
 
+export interface CrawlPage {
+  url: string;
+  status?: number;
+  count: number;
+  titles?: string[];
+  findings?: Finding[];
+  error?: string;
+}
+
 export interface CrawlJob {
   id: string;
   seed: string;
@@ -57,7 +66,7 @@ export interface CrawlJob {
   error?: string;
   scanned: number;
   maxPages: number;
-  pages: { url: string; status: number; findings: number }[];
+  pages: CrawlPage[];
   findings: Finding[];
   summary: Summary;
   durationMs: number;

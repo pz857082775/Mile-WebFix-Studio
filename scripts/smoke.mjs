@@ -62,6 +62,15 @@ let scanResult;
   const ids = r.data.findings.map((f) => f.ruleId);
   ok('scan 含 duplicate-id', ids.includes('ui-duplicate-id'));
   ok('scan 含 inline-handler', ids.includes('sec-inline-handler') || ids.includes('ui-inline-handler'), ids.join(','));
+  ok('scan 资源健康检查', ids.includes('func-resource-error'), ids.join(','));
+}
+{
+  const r = await j('/api/routes', { url: BASE + '/demo' });
+  ok('routes 发现', r.status === 200 && Array.isArray(r.data.routes) && r.data.routes.length >= 3, `routes=${r.data.routes?.length}`);
+  ok('routes 含起始页', r.data.routes.some((u) => u.endsWith('/demo')));
+  ok('routes 含子页', r.data.routes.some((u) => u.includes('/demo/about')));
+  const noauth = await j('/api/routes', { url: 'https://example.com/' });
+  ok('routes 未授权拦截', noauth.status === 400);
 }
 {
   const r = await j('/api/scan', { url: 'https://example.com/' });
@@ -86,6 +95,8 @@ let crawlId;
   ok('crawl 多页', job.pages.length >= 3, `pages=${job.pages?.length}`);
   ok('crawl 聚合 findings', job.findings.length >= 8);
   ok('crawl summary', job.summary?.total === job.findings.length);
+  ok('crawl 逐页 findings', job.pages.every((p) => Array.isArray(p.findings) && p.count === p.findings.length), JSON.stringify(job.pages[0]).slice(0, 200));
+  ok('crawl 逐页有检出', job.pages.some((p) => p.findings.length > 0));
   const missing = await j('/api/crawl-status?id=nope');
   ok('crawl 404', missing.status === 404);
 }
@@ -147,6 +158,8 @@ console.log('== 修复四件套 ==');
 
 console.log('== AI（零成本默认）==');
 {
+  // 配置会持久化到系统用户目录：先复位为零成本默认，保证断言不受历史配置影响
+  await j('/api/ai/config', { enabled: false });
   const r = await j('/api/ai/config');
   ok('ai config', r.status === 200 && r.data.providers.length === 8 && r.data.config.enabled === false);
   const bad = await j('/api/ai/config', { baseUrl: 'ftp://x' });
@@ -194,6 +207,9 @@ console.log('== 扩展市场 / AI 添加 / 拖拽导入 ==');
   ok('presets 列表', ps.status === 200 && ps.data.presets.length >= 12);
   ok('presets 含 nuclei', ps.data.presets.some((p) => p.id === 'tool-nuclei' && p.transport === 'cli'));
   ok('presets 含 module 技能', ps.data.presets.some((p) => p.id === 'skill-jwt' && p.transport === 'module'));
+  // 扩展商店也会持久化：先清理可能残留的同名预设，保证安装断言可重复
+  await j('/api/ext/remove', { id: 'skill-jwt' });
+  await j('/api/ext/remove', { id: 'tool-nuclei' });
   // 一键接入内置 module 技能（零成本开箱即用）
   const inst = await j('/api/ext/install-preset', { id: 'skill-jwt' });
   ok('install module 预设', inst.status === 200 && inst.data.ext.id === 'skill-jwt' && inst.data.ext.transport === 'module', JSON.stringify(inst.data).slice(0, 150));

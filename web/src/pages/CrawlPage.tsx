@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { api, download, isLocalUrl } from '../lib/api';
 import { CAT, SEV, summaryOf } from '../lib/format';
 import type { CrawlJob, Finding, Rule } from '../lib/types';
@@ -20,6 +20,7 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
   const [aiBusy, setAiBusy] = useState(false);
   const [aiStatus, setAiStatus] = useState('');
   const [rules, setRules] = useState<Rule[]>([]);
+  const [expanded, setExpanded] = useState<string | null>(null);
   const timer = useRef<number>(0);
 
   useEffect(() => {
@@ -153,17 +154,57 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
             <button className="btn-ghost" disabled={aiBusy} onClick={deep}>{aiBusy ? 'AI 挖掘中…' : 'AI 深度挖掘'}</button>
             {aiStatus && <span className="text-xs text-ink-3">{aiStatus}</span>}
           </div>
-          <Section title={`已扫描页面 · ${job.pages.length}`} bodyClass="px-5 py-3">
-            <div className="max-h-52 overflow-auto">
+          <Section title={`已扫描页面 · ${job.pages.length}`} desc="点击任意页面展开该页单独检出的 BUG / 漏洞" bodyClass="px-5 py-3">
+            <div className="max-h-[420px] overflow-auto">
               <table className="w-full text-xs">
-                <thead><tr className="text-ink-3 text-left"><th className="py-1.5 font-medium">URL</th><th className="w-16 font-medium">状态</th><th className="w-16 font-medium">问题</th></tr></thead>
+                <thead><tr className="text-ink-3 text-left"><th className="py-1.5 font-medium">URL</th><th className="w-16 font-medium">状态</th><th className="w-20 font-medium">问题数</th></tr></thead>
                 <tbody>
                   {job.pages.map((p) => (
-                    <tr key={p.url} className="border-t border-line">
-                      <td className="py-1.5 pr-2 truncate max-w-[560px]" title={p.url}>{p.url}</td>
-                      <td>{p.status}</td>
-                      <td>{p.findings}</td>
-                    </tr>
+                    <Fragment key={p.url}>
+                      <tr
+                        className={`border-t border-line cursor-pointer hover:bg-panel ${expanded === p.url ? 'bg-panel' : ''}`}
+                        onClick={() => setExpanded(expanded === p.url ? null : p.url)}
+                      >
+                        <td className="py-1.5 pr-2 truncate max-w-[520px]" title={p.url}>
+                          <span className="text-ink-3 mr-1.5">{expanded === p.url ? '▾' : '▸'}</span>{p.url}
+                        </td>
+                        <td>{p.error ? <span className="text-danger">错误</span> : p.status}</td>
+                        <td>
+                          {p.count > 0
+                            ? <span className="badge high">{p.count}</span>
+                            : <span className="text-ink-3">0</span>}
+                        </td>
+                      </tr>
+                      {expanded === p.url && (
+                        <tr className="border-t border-line bg-panel">
+                          <td colSpan={3} className="px-3 py-2">
+                            {p.error && <p className="text-danger mb-1">扫描失败：{p.error}</p>}
+                            {(p.findings && p.findings.length > 0) ? (
+                              <div className="space-y-1.5">
+                                {p.findings.map((f, i) => (
+                                  <div key={i} className="flex items-start gap-2">
+                                    <span className={`badge shrink-0 ${f.severity === 'critical' || f.severity === 'high' ? 'high' : f.severity === 'medium' ? 'medium' : 'cat'}`}>
+                                      {SEV[f.severity] || f.severity}
+                                    </span>
+                                    <div className="min-w-0">
+                                      <span className="text-ink-1">{f.title}</span>
+                                      <span className="text-ink-3 ml-2">{CAT[f.category] || f.category}</span>
+                                      {f.evidence && <p className="text-ink-3 break-all mt-0.5">{String(f.evidence).split('\n')[0].slice(0, 160)}</p>}
+                                    </div>
+                                    <button
+                                      className="btn-ghost !h-6 !text-[11px] shrink-0 ml-auto"
+                                      onClick={(e) => { e.stopPropagation(); onFix({ ...f, url: p.url }, p.url); }}
+                                    >修复</button>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : (
+                              <p className="text-ink-3">该页未检出问题。</p>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

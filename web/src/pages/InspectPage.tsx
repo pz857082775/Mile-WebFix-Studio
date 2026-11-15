@@ -30,14 +30,19 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
   const [allowSubmit, setAllowSubmit] = useState(false);
   const [pilotRunning, setPilotRunning] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
+  const [deepBusy, setDeepBusy] = useState(false);
+  const [deepProgress, setDeepProgress] = useState('');
   const [logs, setLogs] = useState<{ t: string; msg: string; cls: string }[]>([]);
   const frameRef = useRef<HTMLIFrameElement>(null);
   const pilotRef = useRef<any>(null);
   const timerRef = useRef<number>(0);
   const sessionRef = useRef<InspectSession | null>(null);
   const rulesRef = useRef(rules);
+  const findingsRef = useRef(findings);
+  const deepStopRef = useRef(false);
   rulesRef.current = rules;
   sessionRef.current = session;
+  findingsRef.current = findings;
 
   useEffect(() => {
     api<{ config: { enabled: boolean } }>('/api/ai/config').then((d) => setAiEnabled(d.config.enabled)).catch(() => {});
@@ -54,14 +59,14 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
     return () => window.removeEventListener('keydown', onKey);
   }, [fullscreen]);
 
-  const addFinding = (f: Finding, furl: string) => {
+  const addFinding = (f: Finding, furl: string): boolean => {
     const key = findingKey(f, furl);
-    setFindings((m) => {
-      if (m.has(key)) return m;
-      const n = new Map(m);
-      n.set(key, { ...f, url: furl });
-      return n;
-    });
+    if (findingsRef.current.has(key)) return false;
+    const n = new Map(findingsRef.current);
+    n.set(key, { ...f, url: furl });
+    findingsRef.current = n;
+    setFindings(n);
+    return true;
   };
 
   const enter = async () => {
@@ -217,6 +222,99 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
   const list = [...findings.values()];
   const feed = events.slice(-60).reverse();
 
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const waitForDoc = async (timeoutMs = 9000): Promise<Document | null> => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const doc = frameRef.current?.contentDocument;
+        if (doc && doc.body && doc.readyState !== 'loading') return doc;
+      } catch { /* 跨域瞬间 */ }
+      await wait(300);
+    }
+    try { return frameRef.current?.contentDocument || null; } catch { return null; }
+  };
+
+  const proxyForRoute = (routeUrl: string): string => {
+    const u = new URL(routeUrl);
+    return `/proxy/${session!.token}${u.pathname}${u.search}`;
+  };
+
+  // 智能逐页深度探测：发现全站路由 → 逐页在内嵌浏览器渲染 → 渲染态 UI 识别 + DOM 体检 + 后端主动漏洞探测
+  const deepScanAll = async () => {
+    if (!session) return toast('请先点击「进入巡检」');
+    if (deepBusy) return;
+    setDeepBusy(true);
+    deepStopRef.current = false;
+    pilotRef.current?.stop?.();
+    setPilotRunning(false);
+    let pages = 0;
+    let added = 0;
+    try {
+      setStatus('正在智能发现全站路由（链接 + robots + sitemap + 前端路由）…');
+      aiLog('开始逐页深度探测：智能发现全站路由', 'act');
+      const { routes } = await api<{ routes: string[] }>('/api/routes', { url: url.trim(), authorized });
+      if (!routes.length) { setStatus('未发现可遍历的路由'); aiLog('未发现路由', 'warn'); return; }
+      aiLog(`发现 ${routes.length} 个路由，开始逐页渲染探测`, 'ok');
+      for (let i = 0; i < routes.length; i++) {
+        if (deepStopRef.current) { aiLog('已手动停止深度探测', 'warn'); break; }
+        const route = routes[i];
+        pages++;
+        setDeepProgress(`逐页深度探测 ${i + 1}/${routes.length}`);
+        setStatus(`逐页深度探测 ${i + 1}/${routes.length}：${route}`);
+        aiLog(`[${i + 1}/${routes.length}] 渲染并探测：${route}`, 'act');
+        try { frameRef.current!.src = proxyForRoute(route); } catch { /* 忽略 */ }
+        await waitForDoc();
+        await wait(1300); // 等待 SPA 渲染完成
+        if (deepStopRef.current) break;
+
+        // 1) 渲染态 UI 识别（点击目标 / 对比度 / 空按钮 / 图片 alt / 坏图）
+        try {
+          const doc = frameRef.current?.contentDocument;
+          if (doc && window.WfPilot) {
+            const p = new window.WfPilot(frameRef.current, { fx: false, getUrl: () => route });
+            const res = p.perceive(doc);
+            for (const it of res.issues || []) {
+              const rule = rulesRef.current.find((r) => r.id === it.ruleId);
+              if (!rule) continue;
+              if (addFinding({ ruleId: it.ruleId, evidence: it.evidence, title: rule.title, category: rule.category, severity: rule.severity }, route)) added++;
+            }
+          }
+        } catch { /* 忽略 */ }
+
+        // 2) 渲染态 DOM 体检（覆盖动态渲染内容）
+        try {
+          const doc = frameRef.current?.contentDocument;
+          if (doc?.documentElement) {
+            const r = await api<{ findings: Finding[] }>('/api/scan-html', { html: doc.documentElement.outerHTML, url: route });
+            for (const f of r.findings) if (addFinding(f, route)) added++;
+          }
+        } catch { /* 忽略 */ }
+
+        // 3) 后端主动漏洞探测 + 响应头 + 链接/资源健康（真实目标地址）
+        try {
+          const r = await api<{ findings: Finding[] }>('/api/scan', { url: route, authorized, active: true, assets: true });
+          for (const f of r.findings) if (addFinding(f, route)) added++;
+        } catch { /* 忽略 */ }
+
+        aiLog(`  ↳ 完成（累计新增 ${added} 条）`, 'ok');
+      }
+      setDeepProgress('');
+      setStatus(`逐页深度探测完成：遍历 ${pages} 个页面，新增 ${added} 条，累计 ${findingsRef.current.size} 个问题`);
+      aiLog(`逐页深度探测结束：遍历 ${pages} 页，新增 ${added} 条`, 'ok');
+      toast(`逐页深度探测完成：${pages} 个页面，新增 ${added} 条问题`);
+    } catch (e: any) {
+      setDeepProgress('');
+      setStatus('逐页深度探测失败：' + e.message);
+      aiLog('深度探测异常：' + e.message, 'warn');
+    } finally {
+      setDeepBusy(false);
+    }
+  };
+
+  const stopDeep = () => { deepStopRef.current = true; toast('正在停止深度探测…'); };
+
   return (
     <div className="p-6 max-w-[1200px] mx-auto">
       <PageHeader id="inspect" />
@@ -240,7 +338,10 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
             <button className="btn-ghost !h-8 !text-xs" onClick={clear}>清空抓取记录</button>
             <button className="btn-ghost !h-8 !text-xs" disabled={aiBusy} onClick={deep}>{aiBusy ? 'AI 挖掘中…' : 'AI 深度挖掘当前页'}</button>
             <span className="w-px h-5 bg-line mx-1" />
-            <button className="btn !h-8 !text-xs" disabled={pilotRunning} onClick={startPilot}>AI 自动巡检</button>
+            <button className="btn !h-8 !text-xs" disabled={deepBusy} onClick={deepScanAll}>{deepBusy ? '逐页探测中…' : '智能逐页深度探测'}</button>
+            <button className="btn-ghost !h-8 !text-xs" disabled={!deepBusy} onClick={stopDeep}>停止探测</button>
+            <span className="w-px h-5 bg-line mx-1" />
+            <button className="btn !h-8 !text-xs" disabled={pilotRunning || deepBusy} onClick={startPilot}>AI 自动巡检</button>
             <button className="btn-ghost !h-8 !text-xs" disabled={!pilotRunning} onClick={stopPilot}>停止 AI</button>
             <label className="flex items-center gap-1.5 text-xs text-ink-2 cursor-pointer ml-1">
               <input type="checkbox" className="accent-[#1677ff]" checked={fx} onChange={(e) => setFx(e.target.checked)} />识别特效
@@ -254,6 +355,12 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
           </div>
         )}
         {status && <p className="text-[13px] text-ink-2 mt-2.5 animate-paneIn">{status}</p>}
+        {deepBusy && deepProgress && (
+          <div className="mt-2 animate-paneIn">
+            <div className="meter"><i className="bg-accent transition-all duration-500" style={{ width: '100%' }} /></div>
+            <p className="text-xs text-ink-3 mt-1.5">{deepProgress} · 渲染态识别 + DOM 体检 + 主动漏洞探测</p>
+          </div>
+        )}
       </Section>
 
       {logs.length > 0 && (
@@ -268,7 +375,7 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
 
       {session && (
         <div
-          className={fullscreen ? 'fixed inset-0 z-[200] bg-white flex flex-col animate-paneIn' : 'card overflow-hidden mb-4 animate-paneIn'}
+          className={fullscreen ? 'fixed inset-0 z-[200] bg-white flex flex-col animate-paneIn' : 'card overflow-hidden mb-4 animate-paneIn flex flex-col'}
           style={fullscreen ? undefined : { height: 620 }}
         >
           {fullscreen && (

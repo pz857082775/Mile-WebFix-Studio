@@ -646,7 +646,12 @@ async fn builtin_agent(state: &Arc<AppState>, ext: &Value, input: &Value, ctx: &
     };
     if id == "agent-rule" {
         if url.is_empty() { return Err("agent-rule 需要 input.url".into()); }
-        let r = scan_target(&state.follow, &state.manual, &url, ScanOpts { probe_paths: input["probePaths"].as_bool().unwrap_or(false), discover: false }).await?;
+        let r = scan_target(&state.follow, &state.manual, &url, ScanOpts {
+            probe_paths: input["probePaths"].as_bool().unwrap_or(false),
+            discover: false,
+            active: input["active"].as_bool().unwrap_or(true),
+            assets: input["assets"].as_bool().unwrap_or(true),
+        }).await?;
         let findings = r["findings"].as_array().cloned().unwrap_or_default();
         return Ok(json!({
             "output": { "status": r["status"], "pages": 1, "headers": r["headers"], "html": r["html"] },

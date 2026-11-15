@@ -120,7 +120,7 @@ async fn run(follow: &Client, manual: &Client, job: &SharedJob) -> Result<(), St
             break;
         }
         let Some((url, depth)) = queue.pop_front() else { break };
-        match scan_target(follow, manual, &url, ScanOpts { probe_paths: false, discover: depth == 0 }).await {
+        match scan_target(follow, manual, &url, ScanOpts { probe_paths: false, discover: depth == 0, active: true, assets: true }).await {
             Ok(result) => {
                 let findings = result["findings"].as_array().cloned().unwrap_or_default();
                 let links = result["links"].as_array().cloned().unwrap_or_default();
@@ -130,6 +130,13 @@ async fn run(follow: &Client, manual: &Client, job: &SharedJob) -> Result<(), St
                     "status": result["status"],
                     "count": findings.len(),
                     "titles": findings.iter().map(|f| f["title"].clone()).collect::<Vec<_>>(),
+                    "findings": findings.iter().map(|f| json!({
+                        "ruleId": f["ruleId"],
+                        "title": f["title"],
+                        "category": f["category"],
+                        "severity": f["severity"],
+                        "evidence": f["evidence"],
+                    })).collect::<Vec<_>>(),
                 }));
                 for f in &findings {
                     let key = format!("{}|{}", f["ruleId"].as_str().unwrap_or(""), f["evidence"].as_str().unwrap_or(""));

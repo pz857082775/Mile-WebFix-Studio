@@ -184,6 +184,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             }))
         }))
         .route("/api/scan", post(api_scan))
+        .route("/api/routes", post(api_routes))
         .route("/api/crawl", post(api_crawl))
         .route("/api/crawl-status", get(api_crawl_status))
         .route("/api/inspect/start", post(api_inspect_start))
@@ -267,11 +268,26 @@ async fn api_scan(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
         Ok(u) => u, Err(r) => return r,
     };
     let probe = v["probePaths"].as_bool().unwrap_or(false);
-    let opts = ScanOpts { probe_paths: probe, discover: v["discover"].as_bool().unwrap_or(probe) };
+    let opts = ScanOpts {
+        probe_paths: probe,
+        discover: v["discover"].as_bool().unwrap_or(probe),
+        active: v["active"].as_bool().unwrap_or(true),
+        assets: v["assets"].as_bool().unwrap_or(true),
+    };
     match scanner::scan_target(&state.follow, &state.manual, url.as_str(), opts).await {
         Ok(r) => json_ok(scanner::with_summary(r)),
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
+}
+
+// ---- 智能路由发现（供逐页深度探测遍历）----
+async fn api_routes(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    let url = match auth_gate(v["url"].as_str(), v["authorized"].as_bool().unwrap_or(false)) {
+        Ok(u) => u, Err(r) => return r,
+    };
+    let routes = scanner::discover_all_routes(&state.follow, &state.manual, url.as_str()).await;
+    json_ok(json!({ "routes": routes, "count": routes.len() }))
 }
 
 async fn api_crawl(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
