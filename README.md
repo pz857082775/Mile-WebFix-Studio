@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.1.0-1677ff" alt="version" />
+  <img src="https://img.shields.io/badge/version-1.2.0-1677ff" alt="version" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Web-00b42a" alt="platform" />
   <img src="https://img.shields.io/badge/Rust-axum-dea584" alt="rust" />
   <img src="https://img.shields.io/badge/React-18%20%2B%20TS%20%2B%20Tailwind-61dafb" alt="react" />
@@ -43,6 +43,8 @@ OWASP Top10 / API Top10 / CWE Top25 / 逻辑 / 数据 / 算法 的安全规则�
 | 🔀 协同编排 | 串行 / 并行 / 条件流程 | 超时重试、错误策略、findings 聚合 + AI 对话自动挑选扩展并编排 |
 | 🗔 桌面托盘 | 右键菜单 打开 / 设置 / 退出 | 左键唤起、关闭最小化到托盘、单实例聚焦 |
 | 🕘 更新记录 | 点击版本号查看历史更新 | 仅公开摘要，内部实现与安全细节保密 |
+| 🛡️ 安全红线 | 扩展 / 编排统一安全护栏 | 禁攻击服务 / 持久攻击 / 恶意破坏 / 恶意脚本，仅放行编译型检测器 |
+| ⬆️ 软件更新 | 启动静默检测 + 手动检查 | GitHub Releases 默认源（可配置覆盖），下载到本地 + 打开文件夹手动安装，可忽略 |
 
 ## 💻 双形态 · 同源一致
 
@@ -58,9 +60,9 @@ OWASP Top10 / API Top10 / CWE Top25 / 逻辑 / 数据 / 算法 的安全规则�
 
 | 形态 | 文件 | 说明 |
 | --- | --- | --- |
-| 桌面 · 安装版 | [`WebFixStudio-1.1.0-x64-setup.exe`](release/desktop/WebFixStudio-1.1.0-x64-setup.exe) | NSIS 安装包（推荐） |
-| 桌面 · 安装版 | [`WebFixStudio-1.1.0-x64.msi`](release/desktop/WebFixStudio-1.1.0-x64.msi) | MSI 安装包 |
-| 桌面 · 便携版 | [`WebFixStudio-1.1.0-x64-portable.exe`](release/desktop/WebFixStudio-1.1.0-x64-portable.exe) | 免安装，双击运行 |
+| 桌面 · 安装版 | [`WebFixStudio-1.2.0-x64-setup.exe`](release/desktop/WebFixStudio-1.2.0-x64-setup.exe) | NSIS 安装包（推荐） |
+| 桌面 · 安装版 | [`WebFixStudio-1.2.0-x64.msi`](release/desktop/WebFixStudio-1.2.0-x64.msi) | MSI 安装包 |
+| 桌面 · 便携版 | [`WebFixStudio-1.2.0-x64-portable.exe`](release/desktop/WebFixStudio-1.2.0-x64-portable.exe) | 免安装，双击运行 |
 | 网页 · 单文件 | [`webfix-server.exe`](release/web/webfix-server.exe) | 双击后浏览器打开 `http://127.0.0.1:8787` |
 
 内置演示靶场 `/demo`（含登录墙 `/demo/admin`），开箱即可体验全部功能。
@@ -94,9 +96,9 @@ cd crates/desktop && cargo tauri build
 
 ## ✅ 质量保障
 
-- 核心单元测试 **19/19** 通过（引擎 / 编排 / 代理 / 知识库计数对齐 / 扩展市场 / AI 编排）。
-- 后端 API 全量冒烟 **111/111** 通过（对齐全部路由与权限拦截 + 扩展市场 / 导入 / AI 编排 + 巡检登录态复用突破登录墙）。
-- 浏览器端到端实测通过（八大功能页 + 多标签批量关闭 + 落地页 + 扩展市场 / AI 编排 / 拖拽导入）。
+- 核心单元测试 **30/30** 通过（引擎 / 编排 / 代理 / 知识库计数对齐 / 扩展市场 / AI 编排 / 安全红线 / 更新）。
+- 后端 API 全量冒烟 **135/135** 通过（对齐全部路由与权限拦截 + 扩展市场 / 导入 / AI 编排 + 巡检登录态复用 + 安全红线 14 项 + 离线更新）。
+- 浏览器端到端实测通过（八大功能页 + 多标签批量关闭 + 落地页 + 扩展市场 / AI 编排 / 拖拽导入 + 更新弹窗下载 / 打开文件夹）。
 
 ## 🔒 安全与隐私
 
@@ -104,21 +106,22 @@ cd crates/desktop && cargo tauri build
 2. **密钥本地化**：AI 密钥仅存本机系统用户目录（Windows `%APPDATA%\WebFixStudio`），只发往你配置的 API 地址。
 3. **零成本硬隔离**：零成本模式由服务端强制不联网大模型，绝不产生费用。
 4. **扩展沙箱**：模块 SKILL 限定目录、编排条件禁用 eval、外部端点校验 http(s)。
-5. **配置持久化**：AI / 扩展 / 编排 / 审计 / 技能统一保存于系统每用户应用数据目录，重装 / 升级自动迁移旧配置，无需重新配置。
+5. **安全红线**：任何智能体 / SKILL / AI Bot / MCP 与编排均禁止执行攻击服务、持久攻击任务、恶意破坏计算机或写入恶意脚本；cli/stdio 仅放行编译型检测器，脚本须走模块源码扫描，编排设 10 分钟时限并全程审计。
+6. **配置持久化**：AI / 扩展 / 编排 / 审计 / 技能统一保存于系统每用户应用数据目录，重装 / 升级自动迁移旧配置，无需重新配置。
 
 ## © 版权与联系
 
-> **Copyright © 米乐 · v1.1.0 · 保留所有权利。**
+> **Copyright © 米乐 · v1.2.0 · 保留所有权利。**
 >
 > - 作者：**米乐**
 > - 微信：**mileai8**
 > - 邮箱：**857082775@qq.com**
-> - 版本：**1.1.0**
+> - 版本：**1.2.0**
 >
 > 本软件（含源码、界面、知识库、图标与交付物）版权归 **米乐** 所有。
 > 未经书面许可，不得用于商业再分发或去除版权标识。详见 [`COPYRIGHT.md`](COPYRIGHT.md)。
 
 <p align="center">
   <img src="assets/logo.png" width="48" alt="logo" /><br/>
-  <sub>© 米乐 · WebFix Studio v1.1.0 · 微信 mileai8 · 857082775@qq.com</sub>
+  <sub>© 米乐 · WebFix Studio v1.2.0 · 微信 mileai8 · 857082775@qq.com</sub>
 </p>

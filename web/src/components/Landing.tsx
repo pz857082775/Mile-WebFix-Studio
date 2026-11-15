@@ -44,7 +44,7 @@ export function Landing({ onOpen, onChangelog }: { onOpen: (id: PageId) => void;
             <img src="/logo.png" alt="WebFix Studio LOGO" className="w-[92px] h-[92px] rounded-[24px] shadow-dialog mb-6" />
             <div className="inline-flex items-center gap-2 px-3 h-7 rounded-full bg-accent-soft text-accent text-xs font-medium">
               <span className="w-1.5 h-1.5 rounded-full bg-accent animate-blink" />
-              WebFix Studio <button className="font-semibold hover:underline cursor-pointer" title="查看历史更新记录" onClick={onChangelog}>v1.1.0</button> · 网页 + 桌面同源 · 三平台
+              WebFix Studio <button className="font-semibold hover:underline cursor-pointer" title="查看历史更新记录" onClick={onChangelog}>v1.2.0</button> · 网页 + 桌面同源 · 三平台
             </div>
             <h1 className="mt-5 text-[56px] leading-none font-black tracking-tight text-ink select-none">米乐大神</h1>
             <p className="mt-4 text-[17px] text-ink-2 font-medium">网页 BUG 与漏洞，从发现到修复一次闭环。</p>
@@ -151,7 +151,7 @@ export function Landing({ onOpen, onChangelog }: { onOpen: (id: PageId) => void;
         </div>
 
         <div className="mt-6 flex items-center justify-between text-[11px] text-ink-3">
-          <span>© 米乐 · <button className="hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={onChangelog}>v1.1.0</button> · 微信 mileai8 · 857082775@qq.com</span>
+          <span>© 米乐 · <button className="hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={onChangelog}>v1.2.0</button> · 微信 mileai8 · 857082775@qq.com</span>
           <span>仅可扫描自有或已获授权的网站</span>
         </div>
       </div>

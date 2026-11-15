@@ -73,6 +73,7 @@ body {
   .badge.low { @apply bg-[#e8f7ff] text-[#1677ff]; }
   .badge.cat { @apply bg-accent-soft text-accent; }
   .badge.ai { @apply bg-[#f5e8ff] text-[#722ed1]; }
+  .badge.ok { @apply bg-[#e8ffea] text-[#00b42a]; }
   .code {
     @apply block bg-[#f7f8fa] border border-line rounded-lg p-3 text-xs leading-relaxed
       font-mono whitespace-pre-wrap break-all text-ink-2 max-h-72 overflow-auto;

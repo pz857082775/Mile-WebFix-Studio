@@ -201,6 +201,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/test", post(ai_test))
         .route("/api/ai/models", post(ai_models))
         .route("/api/ai/analyze", post(ai_analyze))
+        .route("/api/update/check", get(update_check).post(update_check))
+        .route("/api/update/config", get(update_config_get).post(update_config_post))
+        .route("/api/update/download", post(update_download))
         .route("/api/ext/meta", get(ext_meta))
         .route("/api/ext/list", get(|| async { json_ok(json!({ "extensions": extensions::load_store()["extensions"] })) }))
         .route("/api/ext/register", post(ext_register))
@@ -513,6 +516,55 @@ async fn ai_models(State(state): State<Arc<AppState>>, body: Bytes) -> Response 
 async fn ai_analyze(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
     match crate::ai::analyze(&state.manual, &v).await {
+        Ok(r) => json_ok(r),
+        Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+// ---- 软件更新 ----
+async fn update_check(State(state): State<Arc<AppState>>) -> Response {
+    match crate::update::check(&state.follow).await {
+        Ok(r) => json_ok(r),
+        Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
+    }
+}
+
+async fn update_config_get() -> Response {
+    let c = crate::update::load_config();
+    json_ok(json!({
+        "config": { "manifestUrl": c.manifest_url, "autoCheck": c.auto_check },
+        "repo": crate::update::REPO,
+        "current": crate::util::VERSION,
+    }))
+}
+
+async fn update_config_post(body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    let manifest = v["manifestUrl"].as_str().unwrap_or("").trim();
+    if !manifest.is_empty() && !manifest.starts_with("http://") && !manifest.starts_with("https://") {
+        return json_err(StatusCode::BAD_REQUEST, "更新渠道地址必须以 http:// 或 https:// 开头");
+    }
+    let auto = v["autoCheck"].as_bool().unwrap_or(true);
+    let c = crate::update::save_config(manifest, auto);
+    json_ok(json!({ "config": { "manifestUrl": c.manifest_url, "autoCheck": c.auto_check } }))
+}
+
+async fn update_download(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
+    let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
+    let url = v["url"].as_str().unwrap_or("").trim();
+    if url.is_empty() {
+        return json_err(StatusCode::BAD_REQUEST, "缺少下载地址");
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return json_err(StatusCode::BAD_REQUEST, "下载地址必须以 http:// 或 https:// 开头");
+    }
+    let name = {
+        let n = v["name"].as_str().unwrap_or("").trim();
+        if !n.is_empty() { n.to_string() } else {
+            url.split('?').next().unwrap_or(url).rsplit('/').next().unwrap_or("webfix-update.bin").to_string()
+        }
+    };
+    match crate::update::download(&state.follow, url, &name).await {
         Ok(r) => json_ok(r),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
     }

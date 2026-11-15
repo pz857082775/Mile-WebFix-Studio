@@ -4,6 +4,7 @@ use crate::ai::{analyze, chat, load_config, ChatOpts};
 use crate::crawler::{job_json, start_crawl};
 use crate::kb::{get_rule, summarize};
 use crate::scanner::{scan_headers, scan_html, scan_target, ScanOpts};
+use crate::safety::{check_command, check_script_source, deny_entry};
 use crate::util::{config_dir, now_iso, now_ms, trunc};
 use crate::AppState;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -192,6 +193,12 @@ fn s(v: &Value, k: &str) -> String {
     v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
 
+/// 命中安全红线：写审计后返回错误（拒绝执行 / 注册 / 导入）
+fn safety_deny(target: &str, e: String) -> String {
+    audit(deny_entry(target, &e));
+    e
+}
+
 pub async fn register_ext(input: &Value) -> Result<Value, String> {
     let _g = store_lock().lock().await;
     let type_ = s(input, "type");
@@ -228,9 +235,23 @@ pub async fn register_ext(input: &Value) -> Result<Value, String> {
         if !p.starts_with(skills_dir()) {
             return Err(format!("module 技能必须位于 {}", skills_dir().display()));
         }
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            if let Err(e) = check_script_source(&content) {
+                return Err(safety_deny(&s(input, "module"), e));
+            }
+        }
     }
-    if (transport == "stdio" || transport == "cli") && s(input, "command").is_empty() {
-        return Err("stdio/cli 传输需提供 command".into());
+    if transport == "stdio" || transport == "cli" {
+        let command = s(input, "command");
+        if command.is_empty() {
+            return Err("stdio/cli 传输需提供 command".into());
+        }
+        let args: Vec<String> = input["args"].as_array().map(|a| {
+            a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+        }).unwrap_or_default();
+        if let Err(e) = check_command(&command, &args) {
+            return Err(safety_deny(&command, e));
+        }
     }
     let perms: Vec<Value> = input["permissions"].as_array().map(|a| {
         a.iter().filter(|p| p.as_str().map(|x| PERMISSIONS.contains(&x)).unwrap_or(false)).cloned().collect()
@@ -297,6 +318,26 @@ pub async fn update_ext(id: &str, patch: &Value) -> Result<Value, String> {
     if let Some(a) = patch.get("args").and_then(|x| x.as_array()) {
         e["args"] = json!(a);
     }
+    {
+        let transport = s(e, "transport");
+        if transport == "stdio" || transport == "cli" {
+            let command = s(e, "command");
+            let args: Vec<String> = e["args"].as_array().map(|a| {
+                a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+            }).unwrap_or_default();
+            if let Err(err) = check_command(&command, &args) {
+                return Err(safety_deny(&command, err));
+            }
+        }
+        if transport == "module" {
+            let p = resolve_path(&s(e, "module"));
+            if let Ok(content) = std::fs::read_to_string(&p) {
+                if let Err(err) = check_script_source(&content) {
+                    return Err(safety_deny(&s(e, "module"), err));
+                }
+            }
+        }
+    }
     e["updatedAt"] = json!(now_ms());
     let out = e.clone();
     save_store(&store);
@@ -359,6 +400,7 @@ async fn mcp_stdio(ext: &Value, method: &str, params: Value) -> Result<Value, St
     let args: Vec<String> = ext["args"].as_array().map(|a| {
         a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
     }).unwrap_or_default();
+    if let Err(e) = check_command(&command, &args) { return Err(safety_deny(&command, e)); }
     let mut child = tokio::process::Command::new(&command)
         .args(&args)
         .stdin(std::process::Stdio::piped())
@@ -551,6 +593,7 @@ async fn run_cli(ext: &Value, input: &Value, ctx: &Value) -> Result<Value, Strin
     for a in args.iter_mut() {
         if a.contains("{url}") { *a = a.replace("{url}", &url); }
     }
+    if let Err(e) = check_command(&command, &args) { return Err(safety_deny(&command, e)); }
     let payload = json!({ "input": input, "ctx": ctx }).to_string();
     let mut child = tokio::process::Command::new(&command)
         .args(&args)
@@ -581,6 +624,11 @@ async fn run_cli(ext: &Value, input: &Value, ctx: &Value) -> Result<Value, Strin
 
 // module 技能：本地脚本（.js/.mjs 用 Node 执行，.py 用 Python 执行），JSON stdin → JSON stdout
 async fn run_module_skill(path: &Path, input: &Value, ctx: &Value) -> Result<Value, String> {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if let Err(e) = check_script_source(&content) {
+            return Err(safety_deny(&path.display().to_string(), e));
+        }
+    }
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     let payload = json!({ "input": input, "ctx": ctx }).to_string();
     let (program, args): (String, Vec<String>) = match ext.as_str() {
@@ -937,6 +985,7 @@ pub async fn install_preset(id: &str) -> Result<Value, String> {
     }
     if p["transport"].as_str() == Some("module") {
         let src = module_source(id).ok_or_else(|| format!("预设缺少技能源码：{}", id))?;
+        if let Err(e) = check_script_source(src) { return Err(safety_deny(id, e)); }
         let dir = skills_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建技能目录失败：{}", e))?;
         let path = dir.join(format!("{}.mjs", id));
@@ -958,6 +1007,7 @@ pub async fn import_ext(filename: &str, content: &str) -> Result<Value, String> 
         "mjs" | "js" | "cjs" | "py" => {
             if content.trim().is_empty() { return Err("文件内容为空".into()); }
             if content.len() > 512 * 1024 { return Err("技能文件过大（限 512KB）".into()); }
+            if let Err(e) = check_script_source(content) { return Err(safety_deny(name, e)); }
             let dir = skills_dir();
             std::fs::create_dir_all(&dir).map_err(|e| format!("创建技能目录失败：{}", e))?;
             let id = format!("skill-{}", safe_stem);
@@ -1068,5 +1118,29 @@ mod tests {
         let v = extract_obj("```json\n{\"type\":\"skill\",\"name\":\"x\"}\n```").unwrap();
         assert_eq!(v["type"], "skill");
         assert!(extract_obj("no json here").is_none());
+    }
+
+    #[test]
+    fn builtin_module_sources_pass_safety() {
+        for p in presets() {
+            if p["transport"].as_str() == Some("module") {
+                let id = p["id"].as_str().unwrap_or("");
+                let src = module_source(id).unwrap();
+                assert!(crate::safety::check_script_source(src).is_ok(), "内置技能 {} 被安全红线误拦", id);
+            }
+        }
+    }
+
+    #[test]
+    fn cli_presets_pass_safety() {
+        for p in presets() {
+            if p["transport"].as_str() == Some("cli") {
+                let id = p["id"].as_str().unwrap_or("");
+                let cmd = p["command"].as_str().unwrap_or("");
+                let args: Vec<String> = p["args"].as_array().unwrap().iter()
+                    .filter_map(|x| x.as_str().map(String::from)).collect();
+                assert!(crate::safety::check_command(cmd, &args).is_ok(), "开源工具 {} 被安全红线误拦", id);
+            }
+        }
     }
 }

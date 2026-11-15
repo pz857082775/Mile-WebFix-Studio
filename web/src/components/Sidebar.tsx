@@ -9,13 +9,14 @@ const GROUPS: { head: string; ids: PageId[] }[] = [
   { head: '智能', ids: ['ai', 'ext', 'orch'] },
 ];
 
-export function Sidebar({ active, onOpen, collapsed, onCollapse, onAbout, onChangelog }: {
+export function Sidebar({ active, onOpen, collapsed, onCollapse, onAbout, onChangelog, onCheckUpdate }: {
   active: PageId | null;
   onOpen: (id: PageId) => void;
   collapsed: boolean;
   onCollapse: () => void;
   onAbout: () => void;
   onChangelog: () => void;
+  onCheckUpdate: () => void;
 }) {
   const [hidden, setHidden] = useState<Record<string, boolean>>({});
   return (
@@ -68,10 +69,14 @@ export function Sidebar({ active, onOpen, collapsed, onCollapse, onAbout, onChan
         ))}
       </nav>
       <div className="px-3 py-2 border-t border-line">
+        <div className={`nav-item ${collapsed ? 'justify-center !px-0' : ''}`} title="检查更新" onClick={onCheckUpdate}>
+          <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /></svg>
+          {!collapsed && <span className="flex-1">检查更新</span>}
+        </div>
         <div className={`nav-item ${collapsed ? 'justify-center !px-0' : ''}`} title="关于 WebFix Studio" onClick={onAbout}>
           <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 9v6m0-9.5v-.5" /></svg>
           {!collapsed && <span className="flex-1">关于 WebFix</span>}
-          {!collapsed && <button className="text-[10px] text-ink-3 hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={(e) => { e.stopPropagation(); onChangelog(); }}>v1.1.0</button>}
+          {!collapsed && <button className="text-[10px] text-ink-3 hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={(e) => { e.stopPropagation(); onChangelog(); }}>v1.2.0</button>}
         </div>
       </div>
     </aside>

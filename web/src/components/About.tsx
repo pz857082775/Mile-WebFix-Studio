@@ -1,20 +1,23 @@
 import { useEffect, useState } from 'react';
 import { Modal } from './Modal';
 
-export function About({ onClose, onChangelog }: { onClose: () => void; onChangelog: () => void }) {
+export function About({ onClose, onChangelog, onCheckUpdate }: { onClose: () => void; onChangelog: () => void; onCheckUpdate: () => void }) {
   const [meta, setMeta] = useState<{ version?: string; configDir?: string }>({});
   useEffect(() => {
     fetch('/api/meta').then((r) => r.json()).then(setMeta).catch(() => {});
   }, []);
   return (
-    <Modal title="关于 WebFix Studio" onClose={onClose} small footer={<button className="btn" onClick={onClose}>确定</button>}>
+    <Modal title="关于 WebFix Studio" onClose={onClose} small footer={<>
+      <button className="btn-ghost" onClick={onCheckUpdate}>检查更新</button>
+      <button className="btn" onClick={onClose}>确定</button>
+    </>}>
       <div className="flex items-center gap-3">
         <img src="/logo.png" alt="WebFix Studio" className="w-12 h-12 rounded-[12px] shadow-chip" />
         <div>
           <div className="text-[15px] font-bold">WebFix Studio</div>
           <div className="text-xs text-ink-3 mt-0.5">一站式网页 BUG / 漏洞巡检与修复工作台</div>
         </div>
-        <button className="badge cat ml-auto cursor-pointer hover:opacity-75" title="查看历史更新记录" onClick={onChangelog}>v{meta.version || '1.1.0'}</button>
+        <button className="badge cat ml-auto cursor-pointer hover:opacity-75" title="查看历史更新记录" onClick={onChangelog}>v{meta.version || '1.2.0'}</button>
       </div>
       <p className="text-xs text-ink-2 leading-relaxed mt-4">
         自动体检、全站爬行、人工巡检 + AI 自动操作识别；261 条安全知识规则，

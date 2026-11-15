@@ -42,6 +42,39 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// 在系统文件管理器中打开更新包所在文件夹（Windows 选中文件，macOS reveal，Linux 打开目录）
+#[tauri::command]
+fn reveal_in_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let dir = if p.is_dir() {
+        p.to_path_buf()
+    } else {
+        p.parent().map(|x| x.to_path_buf()).unwrap_or_else(|| p.to_path_buf())
+    };
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("explorer");
+        if p.is_file() {
+            c.raw_arg(format!("/select,\"{}\"", path));
+        } else {
+            c.arg(&dir);
+        }
+        c.spawn().map_err(|e| format!("打开文件夹失败：{e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut c = std::process::Command::new("open");
+        if p.is_file() { c.arg("-R").arg(&path); } else { c.arg(&dir); }
+        c.spawn().map_err(|e| format!("打开文件夹失败：{e}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(&dir).spawn().map_err(|e| format!("打开文件夹失败：{e}"))?;
+    }
+    Ok(())
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开软件", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "设置软件", true, None::<&str>)?;
@@ -75,20 +108,27 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 }
 
 fn main() {
+    // 先启动核心服务拿到端口，再把该地址登记为应用自身 origin（frontendDist）。
+    // 否则 Tauri 把 http://127.0.0.1 视为 remote origin 而禁用 IPC，
+    // 导致自定义标题栏窗口控制与 reveal_in_folder 等命令全部失效。
+    let state = AppState::new();
+    let (port, _server) = tauri::async_runtime::block_on(start_server(state, &default_ports()))
+        .expect("核心服务启动失败");
+    let url = format!("http://127.0.0.1:{port}");
+    let parsed: tauri::Url = url.parse().expect("URL 解析失败");
+
+    let mut context = tauri::generate_context!();
+    context.config_mut().build.frontend_dist =
+        Some(tauri::utils::config::FrontendDist::Url(parsed.clone()));
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main(app);
         }))
-        .setup(|app| {
-            // 进程内启动核心服务（8787–8807 回退），与网页版共用同一引擎与前端
-            let state = AppState::new();
-            let (port, _handle) = tauri::async_runtime::block_on(start_server(state, &default_ports()))
-                .map_err(|e| format!("核心服务启动失败：{e}"))?;
-            let url = format!("http://127.0.0.1:{port}");
-            let parsed: tauri::Url = url.parse().map_err(|e| format!("URL 解析失败：{e}"))?;
-
+        .invoke_handler(tauri::generate_handler![reveal_in_folder])
+        .setup(move |app| {
             let app_handle = app.handle().clone();
-            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed))
+            let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::External(parsed.clone()))
                 .title("WebFix Studio · 网页 BUG / 漏洞巡检修复工作台")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(980.0, 640.0)
@@ -123,6 +163,6 @@ fn main() {
             build_tray(&app.handle().clone())?;
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("WebFix Studio 桌面版运行失败");
 }

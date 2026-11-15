@@ -14,7 +14,7 @@ export function StatusBar({ active, tabCount, ruleCount, onChangelog }: { active
       <span className="w-px h-3 bg-line" />
       <span>规则 {ruleCount} 条</span>
       <span className="w-px h-3 bg-line" />
-      <span>© 米乐 · <button className="hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={onChangelog}>v1.1.0</button> · 微信 mileai8</span>
+      <span>© 米乐 · <button className="hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={onChangelog}>v1.2.0</button> · 微信 mileai8</span>
     </footer>
   );
 }

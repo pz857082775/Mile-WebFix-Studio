@@ -379,18 +379,29 @@ pub async fn start_pipeline(
         let t0 = now_ms();
         let steps = def2["steps"].as_array().cloned().unwrap_or_default();
         let mode = def2["mode"].as_str().unwrap_or("serial");
+        let cap_ms = crate::safety::MAX_PIPELINE_MS;
+        let cap_msg = format!("编排总时长超过上限（{} 分钟），已终止以防止持久任务", cap_ms / 60_000);
         if mode == "parallel" {
             let ctx_snapshot = run2.lock().await.context.clone();
             let futs: Vec<_> = steps.iter()
                 .map(|s| run_step(&state2, s, &ctx_snapshot, &id2))
                 .collect();
-            let outcomes = futures::future::join_all(futs).await;
+            let joined = tokio::time::timeout(Duration::from_millis(cap_ms), futures::future::join_all(futs)).await;
             let mut r = run2.lock().await;
-            for o in outcomes {
-                apply_outcome(&mut r, o);
+            match joined {
+                Ok(outcomes) => {
+                    for o in outcomes {
+                        apply_outcome(&mut r, o);
+                    }
+                }
+                Err(_) => r.error = Some(cap_msg.clone()),
             }
         } else {
             for s in &steps {
+                if now_ms() - t0 > cap_ms {
+                    run2.lock().await.error = Some(cap_msg.clone());
+                    break;
+                }
                 let ctx = run2.lock().await.context.clone();
                 let o = run_step(&state2, s, &ctx, &id2).await;
                 let on_error = s["onError"].as_str().unwrap_or("continue");

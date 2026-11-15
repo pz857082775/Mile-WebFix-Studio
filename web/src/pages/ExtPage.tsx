@@ -373,10 +373,10 @@ function ExtForm({ meta, ext, isNew, onClose, onSaved }: { meta: ExtMeta; ext: E
       {(transport === 'stdio' || transport === 'cli') && (
         <>
           <label className="block mt-3"><span className="label">Command（{transport === 'cli' ? '本机命令，如 nuclei' : 'stdio MCP 启动命令'}）</span>
-            <input className="input" value={command} onChange={(e) => setCommand(e.target.value)} placeholder="node" />
+            <input className="input" value={command} onChange={(e) => setCommand(e.target.value)} placeholder={transport === 'cli' ? 'nuclei' : 'webfix-mcp-server'} />
           </label>
           <label className="block mt-3"><span className="label">Args（逗号分隔{transport === 'cli' ? '，{url} 会替换为目标地址' : ''}）</span>
-            <input className="input" value={args} onChange={(e) => setArgs(e.target.value)} placeholder="server.mjs,--port,3000" />
+            <input className="input" value={args} onChange={(e) => setArgs(e.target.value)} placeholder={transport === 'cli' ? '-u,{url},-jsonl,-silent' : '--stdio'} />
           </label>
         </>
       )}
@@ -406,6 +406,7 @@ function ExtForm({ meta, ext, isNew, onClose, onSaved }: { meta: ExtMeta; ext: E
       </div>
       <p className="text-[11px] text-ink-3 mt-3 leading-relaxed">
         权限控制：调用前必须授予对应权限（扫描 / 网络 / 大模型 / 读页面 / MCP / 通知）。module 技能仅限本机技能目录；所有调用写入审计日志。
+        <br />安全红线：禁止攻击 / 破坏 / 持久化 / 解释器命令与恶意脚本，仅允许无害检测与挖掘；cli / stdio 仅限已编译工具二进制，脚本请走 module（源码自动扫描）。
       </p>
     </Modal>
   );

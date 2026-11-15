@@ -6,8 +6,10 @@ pub mod fixer;
 pub mod kb;
 pub mod orchestrator;
 pub mod proxy;
+pub mod safety;
 pub mod scanner;
 pub mod server;
+pub mod update;
 pub mod util;
 
 use std::collections::HashMap;

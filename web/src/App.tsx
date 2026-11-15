@@ -5,6 +5,7 @@ import { Landing } from './components/Landing';
 import { StatusBar } from './components/StatusBar';
 import { About } from './components/About';
 import { Changelog } from './components/Changelog';
+import { UpdateDialog, type UpdateCheck } from './components/UpdateDialog';
 import { ToastProvider } from './components/Toast';
 import { api } from './lib/api';
 import { onTauriEvent } from './lib/tauri';
@@ -28,11 +29,31 @@ export default function App() {
   const [collapsed, setCollapsed] = useState(false);
   const [about, setAbout] = useState(false);
   const [changelog, setChangelog] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updateInitial, setUpdateInitial] = useState<UpdateCheck | null>(null);
   const seq = useRef(0);
 
   useEffect(() => {
     api<{ rules: Rule[] }>('/api/rules').then((d) => setRules(d.rules)).catch(() => {});
   }, []);
+
+  // 启动静默检测更新：只有「有更新且未被忽略」时才弹出，失败一律静默
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await api<UpdateCheck>('/api/update/check');
+        if (cancelled || !d.autoCheck || !d.hasUpdate) return;
+        let dismissed = '';
+        try { dismissed = localStorage.getItem('wf-update-dismissed') || ''; } catch { /* ignore */ }
+        if (dismissed !== d.latest) { setUpdateInitial(d); setUpdateOpen(true); }
+      } catch { /* 静默失败：不打扰用户 */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const checkUpdate = () => { setAbout(false); setUpdateInitial(null); setUpdateOpen(true); };
+  const dismissUpdate = (v: string) => { try { localStorage.setItem('wf-update-dismissed', v); } catch { /* ignore */ } };
 
   const openTab = (id: PageId) => {
     setTabs((t) => (t.includes(id) ? t : [...t, id]));
@@ -91,6 +112,7 @@ export default function App() {
             collapsed={collapsed} onCollapse={() => setCollapsed(!collapsed)}
             onAbout={() => setAbout(true)}
             onChangelog={() => setChangelog(true)}
+            onCheckUpdate={checkUpdate}
           />
           <div className="flex-1 min-w-0 flex flex-col bg-white">
             <main className="flex-1 min-h-0 relative">
@@ -107,8 +129,9 @@ export default function App() {
             <StatusBar active={active} tabCount={tabs.length} ruleCount={rules.length} onChangelog={() => setChangelog(true)} />
           </div>
         </div>
-        {about && <About onClose={() => setAbout(false)} onChangelog={() => setChangelog(true)} />}
+        {about && <About onClose={() => setAbout(false)} onChangelog={() => setChangelog(true)} onCheckUpdate={checkUpdate} />}
         {changelog && <Changelog onClose={() => setChangelog(false)} />}
+        {updateOpen && <UpdateDialog initial={updateInitial} onClose={() => setUpdateOpen(false)} onDismiss={dismissUpdate} />}
       </div>
     </ToastProvider>
   );
