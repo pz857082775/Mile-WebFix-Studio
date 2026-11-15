@@ -125,6 +125,7 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main(app);
         }))
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![reveal_in_folder])
         .setup(move |app| {
             let app_handle = app.handle().clone();

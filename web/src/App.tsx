@@ -7,6 +7,7 @@ import { About } from './components/About';
 import { Changelog } from './components/Changelog';
 import { UpdateDialog, type UpdateCheck } from './components/UpdateDialog';
 import { ToastProvider } from './components/Toast';
+import { ContextMenu } from './components/ContextMenu';
 import { api } from './lib/api';
 import { onTauriEvent } from './lib/tauri';
 import type { Finding, PageId, Rule } from './lib/types';
@@ -132,6 +133,7 @@ export default function App() {
         {about && <About onClose={() => setAbout(false)} onChangelog={() => setChangelog(true)} onCheckUpdate={checkUpdate} />}
         {changelog && <Changelog onClose={() => setChangelog(false)} />}
         {updateOpen && <UpdateDialog initial={updateInitial} onClose={() => setUpdateOpen(false)} onDismiss={dismissUpdate} />}
+        <ContextMenu />
       </div>
     </ToastProvider>
   );

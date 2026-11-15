@@ -14,6 +14,8 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",
-    "allow-reveal-in-folder"
+    "allow-reveal-in-folder",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
   ]
 }

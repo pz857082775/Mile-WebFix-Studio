@@ -38,3 +38,17 @@ export async function revealInFolder(path: string): Promise<boolean> {
   if (!p) return false;
   try { await p; return true; } catch { return false; }
 }
+
+// 原生读剪贴板（桌面版，绕过 WebView 剪贴板读取权限限制）；网页版返回 null 由前端降级
+export async function readClipboardText(): Promise<string | null> {
+  const p = tauriInvoke<string>('plugin:clipboard-manager|read_text');
+  if (!p) return null;
+  try { return await p; } catch { return null; }
+}
+
+// 原生写剪贴板（桌面版）；网页版返回 false 由前端降级
+export async function writeClipboardText(text: string): Promise<boolean> {
+  const p = tauriInvoke('plugin:clipboard-manager|write_text', { text });
+  if (!p) return false;
+  try { await p; return true; } catch { return false; }
+}

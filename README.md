@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.2.0-1677ff" alt="version" />
+  <img src="https://img.shields.io/badge/version-1.2.1-1677ff" alt="version" />
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Web-00b42a" alt="platform" />
   <img src="https://img.shields.io/badge/Rust-axum-dea584" alt="rust" />
   <img src="https://img.shields.io/badge/React-18%20%2B%20TS%20%2B%20Tailwind-61dafb" alt="react" />
@@ -42,6 +42,7 @@ OWASP Top10 / API Top10 / CWE Top25 / 逻辑 / 数据 / 算法 的安全规则�
 | 🧩 扩展中心 | 智能体 / SKILL / MCP / Bot | 统一注册、配置、权限、审计 + 开源安全扩展市场 + AI 对话添加 + 拖拽导入 |
 | 🔀 协同编排 | 串行 / 并行 / 条件流程 | 超时重试、错误策略、findings 聚合 + AI 对话自动挑选扩展并编排 |
 | 🗔 桌面托盘 | 右键菜单 打开 / 设置 / 退出 | 左键唤起、关闭最小化到托盘、单实例聚焦 |
+| 📋 右键菜单 | 全界面禁用浏览器默认右键菜单 | 文本框右键剪切 / 复制 / 粘贴 / 全选，选中文字右键复制，桌面版原生剪贴板 |
 | 🕘 更新记录 | 点击版本号查看历史更新 | 仅公开摘要，内部实现与安全细节保密 |
 | 🛡️ 安全红线 | 扩展 / 编排统一安全护栏 | 禁攻击服务 / 持久攻击 / 恶意破坏 / 恶意脚本，仅放行编译型检测器 |
 | ⬆️ 软件更新 | 启动静默检测 + 手动检查 | GitHub Releases 默认源（可配置覆盖），下载到本地 + 打开文件夹手动安装，可忽略 |
@@ -60,9 +61,9 @@ OWASP Top10 / API Top10 / CWE Top25 / 逻辑 / 数据 / 算法 的安全规则�
 
 | 形态 | 文件 | 说明 |
 | --- | --- | --- |
-| 桌面 · 安装版 | [`WebFixStudio-1.2.0-x64-setup.exe`](release/desktop/WebFixStudio-1.2.0-x64-setup.exe) | NSIS 安装包（推荐） |
-| 桌面 · 安装版 | [`WebFixStudio-1.2.0-x64.msi`](release/desktop/WebFixStudio-1.2.0-x64.msi) | MSI 安装包 |
-| 桌面 · 便携版 | [`WebFixStudio-1.2.0-x64-portable.exe`](release/desktop/WebFixStudio-1.2.0-x64-portable.exe) | 免安装，双击运行 |
+| 桌面 · 安装版 | [`WebFixStudio-1.2.1-x64-setup.exe`](release/desktop/WebFixStudio-1.2.1-x64-setup.exe) | NSIS 安装包（推荐） |
+| 桌面 · 安装版 | [`WebFixStudio-1.2.1-x64.msi`](release/desktop/WebFixStudio-1.2.1-x64.msi) | MSI 安装包 |
+| 桌面 · 便携版 | [`WebFixStudio-1.2.1-x64-portable.exe`](release/desktop/WebFixStudio-1.2.1-x64-portable.exe) | 免安装，双击运行 |
 | 网页 · 单文件 | [`webfix-server.exe`](release/web/webfix-server.exe) | 双击后浏览器打开 `http://127.0.0.1:8787` |
 
 内置演示靶场 `/demo`（含登录墙 `/demo/admin`），开箱即可体验全部功能。
@@ -111,17 +112,17 @@ cd crates/desktop && cargo tauri build
 
 ## © 版权与联系
 
-> **Copyright © 米乐 · v1.2.0 · 保留所有权利。**
+> **Copyright © 米乐 · v1.2.1 · 保留所有权利。**
 >
 > - 作者：**米乐**
 > - 微信：**mileai8**
 > - 邮箱：**857082775@qq.com**
-> - 版本：**1.2.0**
+> - 版本：**1.2.1**
 >
 > 本软件（含源码、界面、知识库、图标与交付物）版权归 **米乐** 所有。
 > 未经书面许可，不得用于商业再分发或去除版权标识。详见 [`COPYRIGHT.md`](COPYRIGHT.md)。
 
 <p align="center">
   <img src="assets/logo.png" width="48" alt="logo" /><br/>
-  <sub>© 米乐 · WebFix Studio v1.2.0 · 微信 mileai8 · 857082775@qq.com</sub>
+  <sub>© 米乐 · WebFix Studio v1.2.1 · 微信 mileai8 · 857082775@qq.com</sub>
 </p>

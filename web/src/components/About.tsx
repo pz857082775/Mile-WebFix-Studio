@@ -17,7 +17,7 @@ export function About({ onClose, onChangelog, onCheckUpdate }: { onClose: () => 
           <div className="text-[15px] font-bold">WebFix Studio</div>
           <div className="text-xs text-ink-3 mt-0.5">一站式网页 BUG / 漏洞巡检与修复工作台</div>
         </div>
-        <button className="badge cat ml-auto cursor-pointer hover:opacity-75" title="查看历史更新记录" onClick={onChangelog}>v{meta.version || '1.2.0'}</button>
+        <button className="badge cat ml-auto cursor-pointer hover:opacity-75" title="查看历史更新记录" onClick={onChangelog}>v{meta.version || '1.2.1'}</button>
       </div>
       <p className="text-xs text-ink-2 leading-relaxed mt-4">
         自动体检、全站爬行、人工巡检 + AI 自动操作识别；261 条安全知识规则，
