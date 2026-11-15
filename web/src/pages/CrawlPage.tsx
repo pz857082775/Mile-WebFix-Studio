@@ -14,6 +14,9 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
   const [maxPages, setMaxPages] = useState(30);
   const [maxDepth, setMaxDepth] = useState(3);
   const [authorized, setAuthorized] = useState(false);
+  const [useSession, setUseSession] = useState(true);
+  const [cookie, setCookie] = useState('');
+  const [authorization, setAuthorization] = useState('');
   const [job, setJob] = useState<CrawlJob | null>(null);
   const [busy, setBusy] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
@@ -35,7 +38,7 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
     setBusy(true);
     setJob(null);
     try {
-      const { id } = await api<{ id: string }>('/api/crawl', { url: url.trim(), maxPages, maxDepth, authorized });
+      const { id } = await api<{ id: string }>('/api/crawl', { url: url.trim(), maxPages, maxDepth, authorized, useSession, cookie: cookie.trim(), authorization: authorization.trim() });
       timer.current = window.setInterval(async () => {
         try {
           const j = await api<CrawlJob>('/api/crawl-status?id=' + id);
@@ -136,6 +139,22 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
           <input type="checkbox" className="accent-[#1677ff]" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} />
           我拥有该网站或已获得测试授权（本机演示地址无需勾选）
         </label>
+        <div className="mt-3 rounded-lg border border-line bg-panel px-3 py-2.5">
+          <label className="flex items-center gap-2 text-[13px] text-ink-2 cursor-pointer">
+            <input type="checkbox" className="accent-[#1677ff]" checked={useSession} onChange={(e) => setUseSession(e.target.checked)} />
+            复用人工巡检登录态（先在「人工巡检」内嵌浏览器登录，爬行即可扫登录墙后的页面）
+          </label>
+          <div className="flex gap-3 mt-2 flex-wrap">
+            <label className="flex-1 min-w-[220px]">
+              <span className="label">手动 Cookie（可选，优先于登录态）</span>
+              <input className="input" value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="session=abc; token=…" />
+            </label>
+            <label className="flex-1 min-w-[220px]">
+              <span className="label">手动 Authorization（可选）</span>
+              <input className="input" value={authorization} onChange={(e) => setAuthorization(e.target.value)} placeholder="Bearer eyJ…" />
+            </label>
+          </div>
+        </div>
         {job && job.status === 'running' && (
           <div className="mt-4 animate-paneIn">
             <div className="meter"><i className="bg-accent transition-all duration-500" style={{ width: `${Math.max(6, pct)}%` }} /></div>

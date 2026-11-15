@@ -262,6 +262,36 @@ async fn proxy_handler(State(state): State<Arc<AppState>>, req: axum::extract::R
 }
 
 // ---- 单页体检 / 爬行 ----
+// 复用巡检登录态 / 手动 Cookie / Authorization，构建带鉴权的 HTTP 客户端（登录墙后页面可扫）
+async fn auth_clients(state: &AppState, v: &serde_json::Value, url: &url::Url) -> (reqwest::Client, reqwest::Client) {
+    let mut cookie = v["cookie"].as_str().unwrap_or("").trim().to_string();
+    let mut authz = v["authorization"].as_str().unwrap_or("").trim().to_string();
+    if v["useSession"].as_bool().unwrap_or(true) && (cookie.is_empty() || authz.is_empty()) {
+        if let Some(origin) = crate::util::origin_of(url) {
+            let token = proxy::token_for(&origin);
+            if let Some(a) = state.auth_jars.lock().await.get(&token) {
+                if cookie.is_empty() { cookie = a.cookie.clone(); }
+                if authz.is_empty() { authz = a.authorization.clone(); }
+            }
+        }
+    }
+    if cookie.is_empty() && authz.is_empty() {
+        return (state.follow.clone(), state.manual.clone());
+    }
+    let mut headers = reqwest::header::HeaderMap::new();
+    if !cookie.is_empty() { if let Ok(val) = cookie.parse() { headers.insert(reqwest::header::COOKIE, val); } }
+    if !authz.is_empty() { if let Ok(val) = authz.parse() { headers.insert(reqwest::header::AUTHORIZATION, val); } }
+    let follow = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(20))
+        .default_headers(headers.clone())
+        .build().unwrap_or_else(|_| state.follow.clone());
+    let manual = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .build().unwrap_or_else(|_| state.manual.clone());
+    (follow, manual)
+}
+
 async fn api_scan(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
     let url = match auth_gate(v["url"].as_str(), v["authorized"].as_bool().unwrap_or(false)) {
@@ -274,7 +304,8 @@ async fn api_scan(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
         active: v["active"].as_bool().unwrap_or(true),
         assets: v["assets"].as_bool().unwrap_or(true),
     };
-    match scanner::scan_target(&state.follow, &state.manual, url.as_str(), opts).await {
+    let (follow, manual) = auth_clients(&state, &v, &url).await;
+    match scanner::scan_target(&follow, &manual, url.as_str(), opts).await {
         Ok(r) => json_ok(scanner::with_summary(r)),
         Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
@@ -286,7 +317,8 @@ async fn api_routes(State(state): State<Arc<AppState>>, body: Bytes) -> Response
     let url = match auth_gate(v["url"].as_str(), v["authorized"].as_bool().unwrap_or(false)) {
         Ok(u) => u, Err(r) => return r,
     };
-    let routes = scanner::discover_all_routes(&state.follow, &state.manual, url.as_str()).await;
+    let (follow, manual) = auth_clients(&state, &v, &url).await;
+    let routes = scanner::discover_all_routes(&follow, &manual, url.as_str()).await;
     json_ok(json!({ "routes": routes, "count": routes.len() }))
 }
 
@@ -295,8 +327,9 @@ async fn api_crawl(State(state): State<Arc<AppState>>, body: Bytes) -> Response 
     let url = match auth_gate(v["url"].as_str(), v["authorized"].as_bool().unwrap_or(false)) {
         Ok(u) => u, Err(r) => return r,
     };
+    let (follow, manual) = auth_clients(&state, &v, &url).await;
     let job = crawler::start_crawl(
-        state.follow.clone(), state.manual.clone(), url.as_str(),
+        follow, manual, url.as_str(),
         v["maxPages"].as_u64(), v["maxDepth"].as_u64(),
     );
     let id = job.lock().await.id.clone();

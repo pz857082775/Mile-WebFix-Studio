@@ -208,6 +208,14 @@ pub async fn handle_proxy(state: &AppState, req: Request<Body>) -> Response<Body
 
     let method = req.method().clone();
     let req_headers = req.headers().clone();
+    // 记录登录态（Cookie / Authorization），供体检 / 爬行 / 路由发现复用，突破登录墙
+    let authz = req_headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    if !forward_cookies.is_empty() || !authz.is_empty() {
+        let mut jars = state.auth_jars.lock().await;
+        let entry = jars.entry(token.clone()).or_default();
+        if !forward_cookies.is_empty() { entry.cookie = forward_cookies.clone(); }
+        if !authz.is_empty() { entry.authorization = authz; }
+    }
     let body_bytes = if method == Method::POST || method == Method::PUT || method == Method::PATCH {
         axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await.unwrap_or_default()
     } else {

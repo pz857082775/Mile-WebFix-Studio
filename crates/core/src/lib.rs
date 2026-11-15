@@ -20,12 +20,20 @@ pub struct Session {
     pub target: Option<String>,
 }
 
+/// 巡检登录态（按代理 token / 目标 origin 隔离），供体检 / 爬行 / 路由发现复用
+#[derive(Default, Clone)]
+pub struct SessionAuth {
+    pub cookie: String,
+    pub authorization: String,
+}
+
 pub struct AppState {
     /// 跟随重定向（体检 / 爬行）
     pub follow: reqwest::Client,
     /// 不跟随重定向（敏感路径探测 / 巡检代理）
     pub manual: reqwest::Client,
     pub sessions: Mutex<HashMap<String, Session>>,
+    pub auth_jars: Mutex<HashMap<String, SessionAuth>>,
     pub crawls: Mutex<HashMap<String, crawler::SharedJob>>,
     pub runs: Mutex<Vec<(String, orchestrator::SharedRun)>>,
 }
@@ -44,6 +52,7 @@ impl AppState {
             follow,
             manual,
             sessions: Mutex::new(HashMap::new()),
+            auth_jars: Mutex::new(HashMap::new()),
             crawls: Mutex::new(HashMap::new()),
             runs: Mutex::new(Vec::new()),
         })

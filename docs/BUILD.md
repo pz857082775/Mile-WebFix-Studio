@@ -75,7 +75,7 @@ cargo run -p webfix-desktop
 
 ```bash
 cargo test -p webfix-core          # 核心单元测试（引擎/编排/知识库计数等）
-node scripts/smoke.mjs             # 需先启动服务：API 全量冒烟（104 项）
+node scripts/smoke.mjs             # 需先启动服务：API 全量冒烟（111 项）
 ```
 
 ## 6. 持续集成

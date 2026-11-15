@@ -289,6 +289,35 @@ let pipeId, runId;
   ok('orch run 404', st404.status === 404);
 }
 
+console.log('== 巡检登录态复用（登录墙） ==');
+{
+  const s = await j('/api/inspect/start', { url: BASE + '/demo', authorized: true });
+  const token = s.data.token, sid = s.data.sid, cookieName = s.data.cookieName;
+  ok('登录态 会话建立', s.status === 200 && !!token && !!sid);
+  const login = await fetch(BASE + '/proxy/' + token + '/demo/login', {
+    method: 'POST', redirect: 'manual',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: `${cookieName}=${sid}` },
+    body: 'user=demo&pwd=demo',
+  });
+  const sc = login.headers.getSetCookie ? login.headers.getSetCookie() : [login.headers.get('set-cookie')];
+  const authPair = ((sc || []).find((c) => c && c.includes('wf_demo_auth')) || '').split(';')[0];
+  ok('登录态 代理登录回写', !!authPair);
+  await fetch(BASE + '/proxy/' + token + '/demo/admin', { headers: { Cookie: `${cookieName}=${sid}; ${authPair}` } });
+  const hasEval = (d) => (d.findings || []).some((f) => f.ruleId === 'sec-eval-dom');
+  const withS = await j('/api/scan', { url: BASE + '/demo/admin', authorized: true, useSession: true });
+  const noS = await j('/api/scan', { url: BASE + '/demo/admin', authorized: true, useSession: false });
+  const manual = await j('/api/scan', { url: BASE + '/demo/admin', authorized: true, useSession: false, cookie: 'wf_demo_auth=1' });
+  ok('登录态 复用扫到后台', withS.status === 200 && hasEval(withS.data));
+  ok('登录态 不复用仅登录页', noS.status === 200 && !hasEval(noS.data));
+  ok('登录态 手动Cookie兜底', manual.status === 200 && hasEval(manual.data));
+  const cr = await j('/api/crawl', { url: BASE + '/demo', authorized: true, useSession: true, maxPages: 8, maxDepth: 2 });
+  let cj = null;
+  for (let i = 0; i < 30; i++) { await sleep(700); cj = await j('/api/crawl-status?id=' + cr.data.id); if (cj.data.status !== 'running') break; }
+  const ap = (cj.data.pages || []).find((p) => p.url.endsWith('/demo/admin'));
+  ok('登录态 爬行覆盖后台页', !!ap);
+  ok('登录态 爬行后台逐页检出', !!ap && (ap.findings || []).some((f) => f.ruleId === 'sec-eval-dom'));
+}
+
 console.log('== 静态 / 兜底 ==');
 {
   const idx = await fetch(BASE + '/');
