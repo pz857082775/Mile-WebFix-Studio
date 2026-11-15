@@ -9,12 +9,13 @@ const GROUPS: { head: string; ids: PageId[] }[] = [
   { head: '智能', ids: ['ai', 'ext', 'orch'] },
 ];
 
-export function Sidebar({ active, onOpen, collapsed, onCollapse, onAbout }: {
+export function Sidebar({ active, onOpen, collapsed, onCollapse, onAbout, onChangelog }: {
   active: PageId | null;
   onOpen: (id: PageId) => void;
   collapsed: boolean;
   onCollapse: () => void;
   onAbout: () => void;
+  onChangelog: () => void;
 }) {
   const [hidden, setHidden] = useState<Record<string, boolean>>({});
   return (
@@ -70,7 +71,7 @@ export function Sidebar({ active, onOpen, collapsed, onCollapse, onAbout }: {
         <div className={`nav-item ${collapsed ? 'justify-center !px-0' : ''}`} title="关于 WebFix Studio" onClick={onAbout}>
           <svg viewBox="0 0 24 24" className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 9v6m0-9.5v-.5" /></svg>
           {!collapsed && <span className="flex-1">关于 WebFix</span>}
-          {!collapsed && <span className="text-[10px] text-ink-3">v1.1.0</span>}
+          {!collapsed && <button className="text-[10px] text-ink-3 hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={(e) => { e.stopPropagation(); onChangelog(); }}>v1.1.0</button>}
         </div>
       </div>
     </aside>

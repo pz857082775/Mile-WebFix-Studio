@@ -4,6 +4,7 @@ import { TopBar } from './components/TopBar';
 import { Landing } from './components/Landing';
 import { StatusBar } from './components/StatusBar';
 import { About } from './components/About';
+import { Changelog } from './components/Changelog';
 import { ToastProvider } from './components/Toast';
 import { api } from './lib/api';
 import { onTauriEvent } from './lib/tauri';
@@ -26,6 +27,7 @@ export default function App() {
   const [fixReq, setFixReq] = useState<FixRequest | null>(null);
   const [collapsed, setCollapsed] = useState(false);
   const [about, setAbout] = useState(false);
+  const [changelog, setChangelog] = useState(false);
   const seq = useRef(0);
 
   useEffect(() => {
@@ -88,11 +90,12 @@ export default function App() {
             active={active} onOpen={openTab}
             collapsed={collapsed} onCollapse={() => setCollapsed(!collapsed)}
             onAbout={() => setAbout(true)}
+            onChangelog={() => setChangelog(true)}
           />
           <div className="flex-1 min-w-0 flex flex-col bg-white">
             <main className="flex-1 min-h-0 relative">
               {tabs.length === 0 ? (
-                <Landing onOpen={openTab} />
+                <Landing onOpen={openTab} onChangelog={() => setChangelog(true)} />
               ) : (
                 tabs.map((id) => (
                   <div key={id} className={`absolute inset-0 overflow-auto ${active === id ? '' : 'hidden'}`}>
@@ -101,10 +104,11 @@ export default function App() {
                 ))
               )}
             </main>
-            <StatusBar active={active} tabCount={tabs.length} ruleCount={rules.length} />
+            <StatusBar active={active} tabCount={tabs.length} ruleCount={rules.length} onChangelog={() => setChangelog(true)} />
           </div>
         </div>
-        {about && <About onClose={() => setAbout(false)} />}
+        {about && <About onClose={() => setAbout(false)} onChangelog={() => setChangelog(true)} />}
+        {changelog && <Changelog onClose={() => setChangelog(false)} />}
       </div>
     </ToastProvider>
   );

@@ -1,7 +1,7 @@
 import { PAGE_META } from '../lib/format';
 import type { PageId } from '../lib/types';
 
-export function StatusBar({ active, tabCount, ruleCount }: { active: PageId | null; tabCount: number; ruleCount: number }) {
+export function StatusBar({ active, tabCount, ruleCount, onChangelog }: { active: PageId | null; tabCount: number; ruleCount: number; onChangelog: () => void }) {
   return (
     <footer className="statusbar">
       <span className="font-medium text-ink-2">{active ? PAGE_META[active][0] : '首页'}</span>
@@ -14,7 +14,7 @@ export function StatusBar({ active, tabCount, ruleCount }: { active: PageId | nu
       <span className="w-px h-3 bg-line" />
       <span>规则 {ruleCount} 条</span>
       <span className="w-px h-3 bg-line" />
-      <span>© 米乐 · v1.1.0 · 微信 mileai8</span>
+      <span>© 米乐 · <button className="hover:text-accent cursor-pointer" title="查看历史更新记录" onClick={onChangelog}>v1.1.0</button> · 微信 mileai8</span>
     </footer>
   );
 }
