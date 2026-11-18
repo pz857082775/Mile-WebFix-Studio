@@ -9,9 +9,18 @@ export interface ChangeEntry {
 
 export const CHANGELOG: ChangeEntry[] = [
   {
-    version: '1.2.1',
+    version: '1.2.2',
     date: '2026-11',
     tag: '当前版本',
+    items: [
+      '体检、爬行和巡检结果支持关键词、类别与风险等级筛选',
+      '完善搜索参数检测、巡检事件汇总和协同编排',
+      'AI 深度挖掘结果支持保存为知识参考条目',
+    ],
+  },
+  {
+    version: '1.2.1',
+    date: '2026-11',
     items: [
       '界面右键不再弹出浏览器默认菜单，改为与应用风格一致的自定义菜单',
       '文本框右键支持剪切 / 复制 / 粘贴 / 全选，选中文字右键可复制',

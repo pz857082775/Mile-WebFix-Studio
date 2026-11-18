@@ -18,6 +18,8 @@ export function OrchPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
   const [pipeId, setPipeId] = useState('');
   const [url, setUrl] = useState(location.origin + '/demo');
   const [auth, setAuth] = useState(false);
+  const [useSession, setUseSession] = useState(true);
+  const [inspectSid, setInspectSid] = useState('');
   const [running, setRunning] = useState(false);
   const [run, setRun] = useState<PipelineRun | null>(null);
   const [editor, setEditor] = useState<Pipeline | null | undefined>(undefined); // undefined=closed, null=new
@@ -77,7 +79,7 @@ export function OrchPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
     setRunning(true);
     setRun(null);
     try {
-      const d = await api<{ id: string }>('/api/orch/run', { pipelineId: pipe.id, url: u, authorized: isLocalUrl(u) || auth });
+      const d = await api<{ id: string }>('/api/orch/run', { pipelineId: pipe.id, url: u, authorized: isLocalUrl(u) || auth, useSession, inspectSid: inspectSid.trim() });
       if (timer.current) clearInterval(timer.current);
       timer.current = setInterval(() => pollRun(d.id), 700);
       pollRun(d.id);
@@ -183,7 +185,7 @@ export function OrchPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
 
       <Section
         title="协同编排"
-        desc="串行 / 并行 / 条件流程编排智能体与扩展，上下文自动传递（url / findings / stats / outputs），失败可重试。"
+        desc="编排一键体检、全站爬行及已有人工巡检结果，结合智能体与扩展汇总；人工巡检步骤不会自动操作浏览器。"
         actions={<button className="btn !h-8 !text-xs" disabled={running} onClick={startRun}>{running ? '运行中…' : '运行编排'}</button>}
       >
         <div className="flex flex-wrap items-end gap-3">
@@ -194,6 +196,16 @@ export function OrchPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
           <label className="flex items-center gap-2 text-[13px] text-ink-2 cursor-pointer h-9">
             <input type="checkbox" className="accent-[#1677ff]" checked={auth} onChange={(e) => setAuth(e.target.checked)} />
             我已获得该网站测试授权
+          </label>
+        </div>
+        <div className="flex flex-wrap items-end gap-3 mt-3">
+          <label className="flex items-center gap-2 text-[13px] text-ink-2 h-9">
+            <input type="checkbox" className="accent-[#1677ff]" checked={useSession} onChange={(e) => setUseSession(e.target.checked)} />
+            复用人工巡检登录态
+          </label>
+          <label className="flex-1 min-w-[260px]">
+            <span className="label">人工巡检会话 ID（选择巡检结果采集步骤时填写）</span>
+            <input className="input" value={inspectSid} onChange={(e) => setInspectSid(e.target.value)} placeholder="先进入人工巡检，再复制会话 ID" />
           </label>
         </div>
         <div className="flex flex-wrap items-center gap-2 mt-4">

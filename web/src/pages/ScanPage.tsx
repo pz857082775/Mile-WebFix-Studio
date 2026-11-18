@@ -3,6 +3,7 @@ import { api, isLocalUrl } from '../lib/api';
 import { summaryOf } from '../lib/format';
 import type { Finding, ScanResult } from '../lib/types';
 import { FindingCard } from '../components/FindingCard';
+import { FindingFilters, emptyFindingFilter, matchesFinding } from '../components/FindingFilters';
 import { SummaryBar } from '../components/SummaryBar';
 import { useToast } from '../components/Toast';
 import { PageHeader } from '../components/PageHeader';
@@ -16,6 +17,7 @@ export function ScanPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState('');
   const [data, setData] = useState<ScanResult | null>(null);
+  const [filter, setFilter] = useState(emptyFindingFilter);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
   const [aiStatus, setAiStatus] = useState('');
@@ -100,7 +102,8 @@ export function ScanPage({ onFix }: { onFix: (f: Finding, url?: string) => void 
             </button>
             {aiStatus && <span className="text-xs text-ink-3">{aiStatus}</span>}
           </div>
-          {data.findings.map((f, i) => (
+          <FindingFilters value={filter} onChange={setFilter} total={data.findings.length} count={data.findings.filter(f => matchesFinding(f, filter)).length} />
+          {data.findings.filter(f => matchesFinding(f, filter)).map((f, i) => (
             <FindingCard key={(f.ruleId || f.title) + i} f={f} index={i} onFix={(x) => onFix(x, data.finalUrl)} />
           ))}
           {data.findings.length === 0 && <div className="card p-8 text-center text-ink-3 text-sm">未发现已知问题，可尝试 AI 深度挖掘或人工巡检</div>}

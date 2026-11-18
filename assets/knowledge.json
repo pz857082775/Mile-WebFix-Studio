@@ -3839,9 +3839,9 @@
   "sec-sqli-error-based": {
    "category": "security",
    "severity": "high",
-   "title": "报错注入（extractvalue/updatexml 回显数据）",
-   "rootCause": "关闭回显但报错可见时，用 extractvalue/updatexml/geometry 触发含数据的报错逐段拖库。",
-   "test": "注入点加 and extractvalue(1,concat(0x7e,(select user()))) 看报错是否带出数据；试 updatexml/exp。",
+   "title": "疑似 SQL 注入：输入触发数据库错误",
+   "rootCause": "用户输入可能被拼接到 SQL 查询中，且数据库错误被返回给客户端。",
+   "test": "比较正常输入与特殊字符输入的响应；仅在授权范围内人工确认是否存在 SQL 注入。",
    "fix": {
     "frontend": "// 无需前端改动。",
     "backend": "// 参数化 + 生产关闭详细报错（统一错误页）\napp.use((err, req, res, next) => res.status(500).json({ error: 'internal' }));"

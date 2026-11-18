@@ -3,6 +3,7 @@ import { api, download, isLocalUrl } from '../lib/api';
 import { CAT, SEV, summaryOf } from '../lib/format';
 import type { CrawlJob, Finding, Rule } from '../lib/types';
 import { FindingCard } from '../components/FindingCard';
+import { FindingFilters, emptyFindingFilter, matchesFinding } from '../components/FindingFilters';
 import { SummaryBar } from '../components/SummaryBar';
 import { useToast } from '../components/Toast';
 import { PageHeader } from '../components/PageHeader';
@@ -18,6 +19,7 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
   const [cookie, setCookie] = useState('');
   const [authorization, setAuthorization] = useState('');
   const [job, setJob] = useState<CrawlJob | null>(null);
+  const [filter, setFilter] = useState(emptyFindingFilter);
   const [busy, setBusy] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
@@ -173,7 +175,8 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
             <button className="btn-ghost" disabled={aiBusy} onClick={deep}>{aiBusy ? 'AI 挖掘中…' : 'AI 深度挖掘'}</button>
             {aiStatus && <span className="text-xs text-ink-3">{aiStatus}</span>}
           </div>
-          <Section title={`已扫描页面 · ${job.pages.length}`} desc="点击任意页面展开该页单独检出的 BUG / 漏洞" bodyClass="px-5 py-3">
+          <FindingFilters value={filter} onChange={setFilter} total={job.findings.length} count={job.findings.filter(f => matchesFinding(f, filter)).length} />
+          <Section title={`已扫描页面 · ${job.pages.length}`} desc="点击页面展开该页问题，问题列表随筛选条件变化" bodyClass="px-5 py-3">
             <div className="max-h-[420px] overflow-auto">
               <table className="w-full text-xs">
                 <thead><tr className="text-ink-3 text-left"><th className="py-1.5 font-medium">URL</th><th className="w-16 font-medium">状态</th><th className="w-20 font-medium">问题数</th></tr></thead>
@@ -198,9 +201,9 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
                         <tr className="border-t border-line bg-panel">
                           <td colSpan={3} className="px-3 py-2">
                             {p.error && <p className="text-danger mb-1">扫描失败：{p.error}</p>}
-                            {(p.findings && p.findings.length > 0) ? (
+                            {(p.findings && p.findings.filter(f => matchesFinding({ ...f, url: p.url }, filter)).length > 0) ? (
                               <div className="space-y-1.5">
-                                {p.findings.map((f, i) => (
+                                {p.findings.filter(f => matchesFinding({ ...f, url: p.url }, filter)).map((f, i) => (
                                   <div key={i} className="flex items-start gap-2">
                                     <span className={`badge shrink-0 ${f.severity === 'critical' || f.severity === 'high' ? 'high' : f.severity === 'medium' ? 'medium' : 'cat'}`}>
                                       {SEV[f.severity] || f.severity}
@@ -218,7 +221,7 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
                                 ))}
                               </div>
                             ) : (
-                              <p className="text-ink-3">该页未检出问题。</p>
+                              <p className="text-ink-3">该页没有符合筛选条件的问题。</p>
                             )}
                           </td>
                         </tr>
@@ -229,7 +232,7 @@ export function CrawlPage({ onFix }: { onFix: (f: Finding, url?: string) => void
               </table>
             </div>
           </Section>
-          {job.findings.map((f, i) => (
+          {job.findings.filter(f => matchesFinding(f, filter)).map((f, i) => (
             <FindingCard key={(f.ruleId || f.title) + i} f={f} index={i} onFix={(x) => onFix(x, x.url || (x.urls || [])[0] || '')} />
           ))}
         </>

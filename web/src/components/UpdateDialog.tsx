@@ -5,10 +5,14 @@ import { revealInFolder } from '../lib/tauri';
 
 interface Asset { name: string; url: string; size: number }
 export interface UpdateCheck {
-  current: string; latest: string; hasUpdate: boolean; notes: string; url: string;
+  current: string; latest: string; hasUpdate: boolean; currentAhead?: boolean; notes: string; url: string;
   assets: Asset[]; publishedAt: string; source: string; repo: string; autoCheck: boolean; manifestUrl: string;
 }
 interface DownloadResult { ok: boolean; name: string; path: string; dir: string; size: number }
+
+function versionLabel(version: string): string {
+  return `v${version.trim().replace(/^v+/i, '')}`;
+}
 
 function fmtSize(n: number): string {
   if (!n) return '';
@@ -124,14 +128,14 @@ export function UpdateDialog({ onClose, initial, onDismiss }: {
           <div className="flex items-center gap-3">
             <div className="flex-1 min-w-0">
               <div className="text-xs text-ink-3">当前版本</div>
-              <div className="text-[15px] font-bold text-ink">v{data.current}</div>
+              <div className="text-[15px] font-bold text-ink">{versionLabel(data.current)}</div>
             </div>
             <svg viewBox="0 0 24 24" className="w-5 h-5 text-ink-3 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8"><path d="M5 12h14m-6-6 6 6-6 6" /></svg>
             <div className="flex-1 min-w-0 text-right">
               <div className="text-xs text-ink-3">最新版本</div>
-              <div className="text-[15px] font-bold text-accent">v{data.latest}</div>
+              <div className="text-[15px] font-bold text-accent">{versionLabel(data.latest)}</div>
             </div>
-            <span className={`badge ${data.hasUpdate ? 'cat' : 'ok'} shrink-0`}>{data.hasUpdate ? '有更新' : '已是最新'}</span>
+            <span className={`badge ${data.hasUpdate ? 'cat' : 'ok'} shrink-0`}>{data.hasUpdate ? '有更新' : data.currentAhead ? '本地版本较新' : '已是最新'}</span>
           </div>
 
           <div className="text-[11px] text-ink-3">
@@ -186,7 +190,7 @@ export function UpdateDialog({ onClose, initial, onDismiss }: {
           )}
 
           {!data.hasUpdate && (
-            <div className="text-xs text-ink-2">当前已是最新版本，无需更新。</div>
+            <div className="text-xs text-ink-2">{data.currentAhead ? '当前版本高于更新源的最新发布版本，暂不需要更新。' : '当前已是最新版本，无需更新。'}</div>
           )}
 
           <div className="border-t border-line pt-3">

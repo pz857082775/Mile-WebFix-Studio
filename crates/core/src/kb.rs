@@ -2,7 +2,61 @@
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+
+static USER_KB_LOCK: Mutex<()> = Mutex::new(());
+
+fn learned_path() -> std::path::PathBuf { crate::util::config_dir().join("ai-knowledge.json") }
+
+fn read_learned(path: &std::path::Path) -> Result<Vec<Value>, String> {
+    match std::fs::read(path) {
+        Ok(data) => serde_json::from_slice(&data).map_err(|e| format!("AI 知识库读取失败：{e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("AI 知识库读取失败：{e}")),
+    }
+}
+
+pub fn learned_entries() -> Result<Vec<Value>, String> {
+    let _guard = USER_KB_LOCK.lock().map_err(|_| "AI 知识库锁不可用")?;
+    read_learned(&learned_path())
+}
+
+pub fn save_learned(findings: &[Value], model: &str) -> Result<usize, String> {
+    let _guard = USER_KB_LOCK.lock().map_err(|_| "AI 知识库锁不可用")?;
+    let path = learned_path();
+    let mut entries = read_learned(&path)?;
+    let mut added = 0;
+    for f in findings.iter().take(8) {
+        let title = crate::util::trunc(f["title"].as_str().unwrap_or("").trim(), 120);
+        if title.is_empty() || title == "AI 发现" { continue; }
+        let normalized = title.to_lowercase();
+        if kb().all.values().any(|r| r.title.trim().to_lowercase() == normalized)
+            || entries.iter().any(|e| e["title"].as_str().unwrap_or("").trim().to_lowercase() == normalized) { continue; }
+        let category = f["category"].as_str().filter(|s| ["security", "ui", "function", "logic", "data", "algorithm", "performance", "a11y"].contains(s)).unwrap_or("function");
+        let severity = f["severity"].as_str().filter(|s| ["critical", "high", "medium", "low"].contains(s)).unwrap_or("medium");
+        entries.push(json!({
+            "id": format!("kbai-{}", uuid::Uuid::new_v4()), "title": title,
+            "category": category, "severity": severity, "source": "ai", "executable": false,
+            "model": crate::util::trunc(model, 120), "createdAt": crate::util::now_ms(),
+            "rootCause": crate::util::trunc(f["rootCause"].as_str().unwrap_or(""), 400),
+            "test": crate::util::trunc(f["evidence"].as_str().unwrap_or(""), 400),
+            "fix": { "frontend": crate::util::trunc(f["fix"]["frontend"].as_str().unwrap_or(""), 2000), "backend": crate::util::trunc(f["fix"]["backend"].as_str().unwrap_or(""), 2000) },
+            "verify": f["verify"].as_array().map(|a| a.iter().take(3).filter_map(|x| x.as_str()).map(|s| crate::util::trunc(s, 300)).collect::<Vec<_>>()).unwrap_or_default(),
+            "guard": crate::util::trunc(f["guard"].as_str().unwrap_or(""), 400)
+        }));
+        added += 1;
+    }
+    if added > 0 {
+        let parent = path.parent().ok_or("AI 知识库目录无效")?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 AI 知识库目录失败：{e}"))?;
+        let temp = parent.join(format!("ai-knowledge-{}.tmp", uuid::Uuid::new_v4()));
+        let data = serde_json::to_vec_pretty(&entries).map_err(|e| e.to_string())?;
+        std::fs::write(&temp, data).map_err(|e| format!("写入 AI 知识库失败：{e}"))?;
+        if path.exists() { std::fs::copy(&temp, &path).map_err(|e| format!("更新 AI 知识库失败：{e}"))?; std::fs::remove_file(&temp).ok(); }
+        else { std::fs::rename(&temp, &path).map_err(|e| format!("保存 AI 知识库失败：{e}"))?; }
+    }
+    Ok(added)
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Fix {

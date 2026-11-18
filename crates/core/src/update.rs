@@ -87,6 +87,22 @@ fn parse_release(v: &Value) -> (String, String, String, Value, String) {
     (latest, notes, page, json!(assets), published)
 }
 
+fn update_http_error(status: reqwest::StatusCode, headers: &reqwest::header::HeaderMap, github_api: bool) -> String {
+    let remaining = headers.get("x-ratelimit-remaining").and_then(|v| v.to_str().ok());
+    if github_api && (status == reqwest::StatusCode::TOO_MANY_REQUESTS || (status == reqwest::StatusCode::FORBIDDEN && remaining == Some("0"))) {
+        let reset = headers.get("x-ratelimit-reset").and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok())
+            .and_then(|v| chrono::DateTime::from_timestamp(v, 0))
+            .map(|t| format!("（预计 {} UTC 重置）", t.format("%Y-%m-%d %H:%M:%S")))
+            .unwrap_or_default();
+        return format!("GitHub 匿名更新请求已达频率限制{}，请稍后重新检测。", reset);
+    }
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return "更新源拒绝访问（HTTP 403）；请检查更新渠道地址及网络代理。".to_string();
+    }
+    format!("更新源返回 HTTP {}", status.as_u16())
+}
+
 async fn fetch_json(client: &reqwest::Client, url: &str, github_api: bool) -> Result<Value, String> {
     let mut req = client.get(url).timeout(Duration::from_secs(20))
         .header("User-Agent", format!("WebFixStudio/{}", VERSION));
@@ -98,7 +114,7 @@ async fn fetch_json(client: &reqwest::Client, url: &str, github_api: bool) -> Re
         return Ok(Value::Null); // 尚无 Release：视为无更新
     }
     if !r.status().is_success() {
-        return Err(format!("更新源返回 {}", r.status().as_u16()));
+        return Err(update_http_error(r.status(), r.headers(), github_api));
     }
     r.json::<Value>().await.map_err(|_| "更新源响应不是合法 JSON".to_string())
 }
@@ -133,6 +149,7 @@ pub async fn check(client: &reqwest::Client) -> Result<Value, String> {
         "current": current,
         "latest": latest,
         "hasUpdate": newer(&latest, current),
+        "currentAhead": newer(current, &latest),
         "notes": notes,
         "url": page,
         "assets": assets,
@@ -191,6 +208,34 @@ mod tests {
         assert!(!newer("1.0.0", "1.1.0"));
         assert!(!newer("1.2.0-beta", "1.2.0"));
         assert!(newer("1.10.0", "1.9.0"));
+    }
+
+    #[test]
+    fn rate_limit_errors_are_distinguished_from_other_403s() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        headers.insert("x-ratelimit-reset", "1794906899".parse().unwrap());
+        let error = update_http_error(reqwest::StatusCode::FORBIDDEN, &headers, true);
+        assert!(error.contains("频率限制"));
+        assert!(error.contains("2026-11-17 09:14:59 UTC"));
+        assert!(!update_http_error(reqwest::StatusCode::FORBIDDEN, &headers, false).contains("频率限制"));
+        assert!(!update_http_error(reqwest::StatusCode::FORBIDDEN, &reqwest::header::HeaderMap::new(), true).contains("频率限制"));
+        assert!(update_http_error(reqwest::StatusCode::TOO_MANY_REQUESTS, &reqwest::header::HeaderMap::new(), true).contains("频率限制"));
+    }
+
+    #[tokio::test]
+    async fn github_rate_limit_is_reported_from_http_response() {
+        use axum::{http::StatusCode, routing::get, Router};
+        let app = Router::new().route("/release", get(|| async {
+            (StatusCode::FORBIDDEN, [("x-ratelimit-remaining", "0"), ("x-ratelimit-reset", "1794906899")], "rate limited")
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let error = fetch_json(&reqwest::Client::new(), &format!("http://{addr}/release"), true).await.unwrap_err();
+        assert!(error.contains("频率限制"));
+        assert!(error.contains("2026-11-17 09:14:59 UTC"));
+        server.abort();
     }
 
     #[test]

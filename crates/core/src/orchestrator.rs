@@ -226,9 +226,11 @@ fn value_to_string(v: &Value) -> String {
 }
 
 // ---- 上下文与合并 ----
-fn new_context(url: &str) -> Value {
+fn new_context(url: &str, use_session: bool, inspect_sid: &str) -> Value {
     json!({
         "url": url,
+        "useSession": use_session,
+        "inspectSid": inspect_sid,
         "findings": [],
         "stats": { "total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0 },
         "outputs": {},
@@ -237,7 +239,7 @@ fn new_context(url: &str) -> Value {
 }
 
 fn finding_key(f: &Value) -> String {
-    format!("{}|{}", f["ruleId"].as_str().unwrap_or(""), f["title"].as_str().unwrap_or(""))
+    format!("{}|{}|{}", f["ruleId"].as_str().unwrap_or(""), f["title"].as_str().unwrap_or(""), f["url"].as_str().unwrap_or(""))
 }
 
 fn merge_findings(ctx: &mut Value, list: &[Value]) {
@@ -289,6 +291,12 @@ async fn run_step(state: &Arc<AppState>, step: &Value, ctx: &Value, run_id: &str
         let url = input.get("url").and_then(|v| v.as_str()).filter(|u| !u.is_empty())
             .map(|u| u.to_string())
             .unwrap_or_else(|| ctx["url"].as_str().unwrap_or("").to_string());
+        let root = url::Url::parse(ctx["url"].as_str().unwrap_or(""));
+        let target = url::Url::parse(&url);
+        if !matches!((&root, &target), (Ok(a), Ok(b)) if matches!(b.scheme(), "http" | "https") && b.username().is_empty() && b.password().is_none() && a.origin() == b.origin()) {
+            last_err = "步骤目标必须与已授权目标同源".into();
+            break;
+        }
         input.insert("url".into(), json!(url));
         let mut ext_ctx = ctx.as_object().cloned().unwrap_or_default();
         ext_ctx.insert("pipelineId".into(), json!(run_id));
@@ -339,6 +347,8 @@ pub async fn start_pipeline(
     pipeline_id: Option<&str>,
     pipeline: Option<&Value>,
     url: &str,
+    use_session: bool,
+    inspect_sid: &str,
 ) -> Result<String, String> {
     let def = if let Some(id) = pipeline_id {
         let stored = load_store()["pipelines"].as_array().cloned().unwrap_or_default()
@@ -359,7 +369,7 @@ pub async fn start_pipeline(
         started_at: now_ms(),
         finished_at: None,
         steps: vec![],
-        context: new_context(url),
+        context: new_context(url, use_session, inspect_sid),
         summary: None,
         error: None,
     }));
@@ -478,6 +488,7 @@ fn rule_compose(prompt: &str, exts: &[Value]) -> Value {
     }
     let crawl = p.contains("全站") || p.contains("爬行") || p.contains("所有页面") || p.contains("crawl");
     if crawl && has(&exts, "agent-crawl") { push(&mut steps, &exts, "crawl", "agent-crawl", None); } else { push(&mut steps, &exts, "scan", "agent-rule", None); }
+    if p.contains("人工巡检") || p.contains("巡检会话") { push(&mut steps, &exts, "inspect", "agent-inspect", None); }
     if p.contains("秘钥") || p.contains("密钥") || p.contains("泄露") || p.contains("token") || p.contains("secret") {
         push(&mut steps, &exts, "secret", "skill-secret", None);
         push(&mut steps, &exts, "entropy", "skill-entropy", None);
@@ -578,7 +589,7 @@ mod tests {
 
     #[test]
     fn merge_dedupes_and_counts() {
-        let mut ctx = new_context("https://x");
+        let mut ctx = new_context("https://x", true, "");
         merge_findings(&mut ctx, &[
             json!({ "ruleId": "a", "title": "T1", "severity": "high" }),
             json!({ "ruleId": "a", "title": "T1", "severity": "high" }),

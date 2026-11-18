@@ -98,6 +98,7 @@ fn builtins() -> Vec<Value> {
     json!([
         { "id": "agent-rule", "type": "agent", "transport": "builtin", "name": "规则扫描智能体", "version": "1.0.0", "description": "内置 261 条规则单页体检", "permissions": ["scan"], "config": {} },
         { "id": "agent-crawl", "type": "agent", "transport": "builtin", "name": "全站爬行智能体", "version": "1.0.0", "description": "自动发现同域路由并聚合体检", "permissions": ["scan", "network"], "config": { "maxPages": 20 } },
+        { "id": "agent-inspect", "type": "agent", "transport": "builtin", "name": "人工巡检结果采集", "version": "1.0.0", "description": "读取指定巡检会话已有的抓取结果；不自动启动浏览器", "permissions": ["scan"], "config": {} },
         { "id": "agent-ai", "type": "agent", "transport": "builtin", "name": "AI 深度挖掘智能体", "version": "1.0.0", "description": "调用已配置大模型挖掘逻辑/越权/资损", "permissions": ["llm"], "config": {} },
         { "id": "skill-header", "type": "skill", "transport": "builtin", "name": "响应头审计技能", "version": "1.0.0", "description": "CSP/HSTS/Cookie/CORS 等响应头检查", "permissions": ["read_html"], "config": {} },
         { "id": "skill-secret", "type": "skill", "transport": "builtin", "name": "秘钥泄露扫描技能", "version": "1.0.0", "description": "HTML/JS 中硬编码秘钥、token、私钥识别", "permissions": ["read_html"], "config": {} },
@@ -692,9 +693,50 @@ async fn builtin_agent(state: &Arc<AppState>, ext: &Value, input: &Value, ctx: &
         let u = s(input, "url");
         if u.is_empty() { s(ctx, "url") } else { u }
     };
+    if id == "agent-inspect" {
+        let sid = input["sid"].as_str().filter(|s| !s.is_empty())
+            .or_else(|| ctx["inspectSid"].as_str().filter(|s| !s.is_empty()))
+            .ok_or("请提供已有人工巡检会话 ID；该步骤不会自动打开巡检浏览器")?;
+        let sessions = state.sessions.lock().await;
+        let session = sessions.get(sid).ok_or("人工巡检会话不存在或已失效")?;
+        let target = session.target.as_deref().and_then(|s| url::Url::parse(s).ok()).ok_or("巡检会话目标无效")?;
+        let requested = url::Url::parse(&url).map_err(|_| "编排目标 URL 无效")?;
+        if target.origin() != requested.origin() { return Err("巡检会话与编排目标必须同源".into()); }
+        let mut findings = Vec::new();
+        for event in &session.events {
+            let real_url = event["realUrl"].as_str().unwrap_or("");
+            if !real_url.is_empty() && url::Url::parse(real_url).map(|u| u.origin() != requested.origin()).unwrap_or(true) { continue; }
+            let page = if real_url.is_empty() { url.as_str() } else { real_url };
+            if event["type"] == "scan" {
+                for f in event["findings"].as_array().into_iter().flatten() {
+                    let mut f = f.clone(); f["url"] = json!(page); findings.push(f);
+                }
+            }
+            let rule_id = match event["type"].as_str().unwrap_or("") {
+                "exception" => Some("func-js-exception"),
+                "network" => Some("func-network-error"),
+                "resource" => Some("func-resource-error"),
+                "console" if event["level"] == "error" => Some("func-console-error"),
+                _ => None,
+            };
+            if let Some(rule_id) = rule_id {
+                let raw = json!({ "ruleId": rule_id, "url": page, "evidence": event["message"].as_str().unwrap_or("") });
+                findings.extend(crate::kb::enrich_findings(&[raw]));
+            }
+            if event["type"] == "dom" {
+                for issue in event["issues"].as_array().into_iter().flatten() {
+                    let raw = json!({ "ruleId": issue["ruleId"], "url": page, "evidence": issue["evidence"] });
+                    findings.extend(crate::kb::enrich_findings(&[raw]));
+                }
+            }
+        }
+        return Ok(json!({ "output": { "events": session.events.len(), "mode": "已有巡检会话" }, "findings": findings }));
+    }
+    let target = url::Url::parse(&url).map_err(|_| "目标 URL 无效")?;
+    let auth_input = json!({ "useSession": ctx["useSession"].as_bool().unwrap_or(true) });
+    let (follow, manual) = crate::server::auth_clients(state, &auth_input, &target).await;
     if id == "agent-rule" {
-        if url.is_empty() { return Err("agent-rule 需要 input.url".into()); }
-        let r = scan_target(&state.follow, &state.manual, &url, ScanOpts {
+        let r = scan_target(&follow, &manual, &url, ScanOpts {
             probe_paths: input["probePaths"].as_bool().unwrap_or(false),
             discover: false,
             active: input["active"].as_bool().unwrap_or(true),
@@ -710,7 +752,7 @@ async fn builtin_agent(state: &Arc<AppState>, ext: &Value, input: &Value, ctx: &
     if id == "agent-crawl" {
         if url.is_empty() { return Err("agent-crawl 需要 input.url".into()); }
         let max_pages = ext["config"]["maxPages"].as_u64().unwrap_or(20);
-        let job = start_crawl(state.follow.clone(), state.manual.clone(), &url, Some(max_pages), None);
+        let job = start_crawl(follow, manual, &url, Some(max_pages), None);
         let job_id = job.lock().await.id.clone();
         state.crawls.lock().await.insert(job_id.clone(), job.clone());
         let t0 = now_ms();

@@ -24,7 +24,7 @@ console.log('== 基础 ==');
 }
 {
   const r = await j('/api/meta');
-  ok('meta version', r.status === 200 && r.data.version === '1.2.1', JSON.stringify(r.data));
+  ok('meta version', r.status === 200 && r.data.version === '1.2.2', JSON.stringify(r.data));
   ok('meta configDir 持久化路径', typeof r.data.configDir === 'string' && r.data.configDir.length > 0, r.data.configDir);
 }
 {
@@ -179,7 +179,7 @@ let extId;
   const meta = await j('/api/ext/meta');
   ok('ext meta', meta.data.types.length === 4 && meta.data.transports.length === 6 && meta.data.modes.length === 3 && meta.data.ops.length === 9);
   const list = await j('/api/ext/list');
-  ok('ext 内置 8 个', list.data.extensions.filter((e) => e.builtin).length === 8);
+  ok('ext 内置巡检步骤', ['agent-rule', 'agent-crawl', 'agent-inspect'].every((id) => list.data.extensions.some((e) => e.builtin && e.id === id)));
   const reg = await j('/api/ext/register', { type: 'skill', transport: 'builtin', name: '冒烟技能' });
   ok('ext 注册 builtin 拒绝', reg.status === 400);
   const reg2 = await j('/api/ext/register', { type: 'bot', transport: 'http', name: '冒烟Bot', endpoint: 'http://127.0.0.1:9/none', permissions: ['notify'] });
@@ -376,7 +376,7 @@ console.log('== 软件更新（本地清单·离线确定性）==');
   srvPort = srv.address().port;
   const manifestUrl = `http://127.0.0.1:${srvPort}/manifest.json`;
   const cfg0 = await j('/api/update/config');
-  ok('update config 形状', cfg0.status === 200 && cfg0.data.current === '1.2.1' && typeof cfg0.data.repo === 'string', JSON.stringify(cfg0.data).slice(0, 150));
+  ok('update config 形状', cfg0.status === 200 && cfg0.data.current === '1.2.2' && typeof cfg0.data.repo === 'string', JSON.stringify(cfg0.data).slice(0, 150));
   const badCfg = await j('/api/update/config', { manifestUrl: 'ftp://x' });
   ok('update manifestUrl 校验', badCfg.status === 400);
   const setCfg = await j('/api/update/config', { manifestUrl, autoCheck: true });

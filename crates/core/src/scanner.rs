@@ -49,7 +49,7 @@ re!(re_post_form, r#"(?is)<form\b[^>]*>.*?</form>"#);
 re!(re_method_post, r#"(?i)method\s*=\s*["']?post"#);
 re!(re_csrf, r#"(?i)<input\b[^>]*type\s*=\s*["']?hidden[^>]*name\s*=\s*["']?(_csrf|csrf|token|authenticity_token)"#);
 re!(re_secret, r#"(?i)(?:api[_-]?key|apikey|secret[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|pwd)\s*[:=]\s*["'][A-Za-z0-9_\-./+=]{8,}["']|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC )?PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}"#);
-re!(re_sqlerr, r#"(?i)SQL syntax|mysql_fetch|mysqli?_|ORA-\d{5}|PostgreSQL.*ERROR|SQLite3?::|sqlalchemy\.|JDBC|Unclosed quotation|quoted string not properly terminated"#);
+re!(re_sqlerr, r#"(?i)SQL syntax|mysql_fetch|mysqli?_|ORA-\d{5}|PostgreSQL.*ERROR|SQLite3?::|sqlalchemy\.|JDBC|Unclosed quotation|quoted string not properly terminated|unrecognized token:|unterminated string literal"#);
 re!(re_price_name, r#"(?i)name\s*=\s*["']?(price|amount|total|money|pay|fee|cost|discount)"#);
 re!(re_idor, r#"(?i)(?:href|action)\s*=\s*["'][^"']*(?:[?&](?:id|uid|orderId|user_id)=\d+|/(?:order|user|file|invoice)s?/\d+)["']"#);
 re!(re_pwd_url, r#"(?i)(?:href|action)\s*=\s*["'][^"']*[?&](?:pwd|password|passwd|token|secret)=[^"'&]+"#);
@@ -156,21 +156,22 @@ pub fn scan_html(html: &str, url_href: &str) -> Vec<Value> {
         push("ui-duplicate-id", format!("重复的 id：{}", dups.join("、")));
     }
 
-    let inputs = matches(re_input(), html);
     let lower = html.to_lowercase();
-    let unlabeled: Vec<&String> = inputs.iter().filter(|t| {
-        if re_input_skip().is_match(t) { return false; }
-        if re_aria().is_match(t) { return false; }
+    let label_re = regex::Regex::new(r"(?is)<label\b[^>]*>.*?</label\s*>").unwrap();
+    let unlabeled: Vec<String> = re_input().find_iter(html).filter_map(|m| {
+        let t = m.as_str();
+        if re_input_skip().is_match(t) || re_aria().is_match(t) { return None; }
+        if label_re.find_iter(html).any(|label| label.start() <= m.start() && label.end() >= m.end()) { return None; }
         if let Some(c) = re_id().captures(t) {
             let id = c[1].to_lowercase();
             if lower.contains(&format!("for=\"{}\"", id)) || lower.contains(&format!("for='{}'", id)) {
-                return false;
+                return None;
             }
         }
-        true
+        Some(t.to_string())
     }).collect();
     if !unlabeled.is_empty() {
-        push("ui-input-no-label", format!("{} 个表单输入缺少 label/aria-label 关联，例如：{}", unlabeled.len(), trunc(unlabeled[0], 100)));
+        push("ui-input-no-label", format!("{} 个表单输入缺少 label/aria-label 关联，例如：{}", unlabeled.len(), trunc(&unlabeled[0], 100)));
     }
 
     let handlers = matches(re_handler(), html);
@@ -563,6 +564,34 @@ fn with_param(url: &Url, pairs: &[(String, String)], name: &str, value: &str) ->
     u
 }
 
+fn get_form_probe_urls(html: &str, base_url: &str) -> Vec<String> {
+    let Ok(base) = Url::parse(base_url) else { return Vec::new() };
+    let action_re = regex::Regex::new(r#"(?i)\baction\s*=\s*["']([^"']*)["']"#).unwrap();
+    let method_re = regex::Regex::new(r#"(?i)\bmethod\s*=\s*["']?([^\s"'>]+)"#).unwrap();
+    let name_re = regex::Regex::new(r#"(?i)\bname\s*=\s*["']([^"']+)["']"#).unwrap();
+    let mut urls = Vec::new();
+    for form in re_post_form().find_iter(html).take(8) {
+        let form = form.as_str();
+        let Some(tag) = re_form().find(form).map(|m| m.as_str()) else { continue };
+        if method_re.captures(tag).is_some_and(|m| !m[1].eq_ignore_ascii_case("get")) { continue; }
+        let action = action_re.captures(tag).map(|m| m[1].to_string()).unwrap_or_default();
+        let Ok(mut target) = base.join(&action) else { continue };
+        if target.origin() != base.origin() || !matches!(target.scheme(), "http" | "https") { continue; }
+        if target.path() != base.path() { continue; }
+        let names: Vec<String> = re_input().find_iter(form)
+            .filter(|m| !re_input_skip().is_match(m.as_str()) && !re_pwd_input().is_match(m.as_str()))
+            .filter_map(|m| name_re.captures(m.as_str()).map(|c| c[1].to_string()))
+            .filter(|name| ["q", "query", "search", "keyword", "term"].iter().any(|n| name.eq_ignore_ascii_case(n)))
+            .take(4).collect();
+        if names.is_empty() { continue; }
+        target.query_pairs_mut().clear().extend_pairs(names.iter().map(|n| (n.as_str(), "")));
+        let target = target.to_string();
+        if !urls.contains(&target) { urls.push(target); }
+        if urls.len() >= 4 { break; }
+    }
+    urls
+}
+
 /// 主动无害漏洞探测：仅发送带 canary 的 GET，不提交表单、不写数据、不执行脚本。
 /// 反射 XSS / SQLi 报错 / 开放重定向 / 路径遍历 / CORS 反射。
 pub async fn probe_active(manual: &Client, url_href: &str) -> Vec<Value> {
@@ -587,6 +616,14 @@ pub async fn probe_active(manual: &Client, url_href: &str) -> Vec<Value> {
         }
     }
 
+    let baseline_has_sql_error = if names.is_empty() {
+        false
+    } else if let Ok(r) = manual.get(url.as_str()).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
+        re_sqlerr().is_match(&r.text().await.unwrap_or_default())
+    } else {
+        true
+    };
+
     for name in &names {
         let orig = pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).unwrap_or_default();
         // 反射 XSS：canary 原样（未转义）出现在响应中
@@ -603,8 +640,10 @@ pub async fn probe_active(manual: &Client, url_href: &str) -> Vec<Value> {
         let su = with_param(&url, &pairs, name, &format!("{}'", orig));
         if let Ok(r) = manual.get(su.as_str()).timeout(Duration::from_secs(6)).header("User-Agent", UA).send().await {
             let body = r.text().await.unwrap_or_default();
-            if let Some(m) = re_sqlerr().find(&body) {
-                raw.push(json!({ "ruleId": "sec-sqli-error-based", "evidence": format!("参数 {} 追加单引号触发数据库报错：{}", name, trunc(m.as_str(), 80)) }));
+            if !baseline_has_sql_error {
+                if let Some(m) = re_sqlerr().find(&body) {
+                    raw.push(json!({ "ruleId": "sec-sqli-error-based", "evidence": format!("{} 参数 {} 追加单引号后出现数据库报错，基线未见该错误：{}；请人工验证", url.path(), name, trunc(m.as_str(), 80)) }));
+                }
             }
         }
         // 开放重定向
@@ -734,8 +773,15 @@ pub async fn scan_target(follow: &Client, manual: &Client, raw_url: &str, opts: 
     }
 
     if opts.active {
-        let active = tokio::time::timeout(Duration::from_secs(20), probe_active(manual, url.as_str()))
-            .await.unwrap_or_default();
+        let active = tokio::time::timeout(Duration::from_secs(30), async {
+            let mut findings = probe_active(manual, url.as_str()).await;
+            for form_url in get_form_probe_urls(&html, &final_url) {
+                if form_url != url.as_str() {
+                    findings.extend(probe_active(manual, &form_url).await);
+                }
+            }
+            findings
+        }).await.unwrap_or_default();
         raw.extend(active);
     }
     if opts.assets {
@@ -752,7 +798,9 @@ pub async fn scan_target(follow: &Client, manual: &Client, raw_url: &str, opts: 
         if let Some(&i) = index.get(&rid) {
             let old = merged[i]["evidence"].as_str().unwrap_or("").to_string();
             let add = f["evidence"].as_str().unwrap_or("");
-            merged[i]["evidence"] = json!(format!("{}\n{}", old, add));
+            if !old.lines().any(|line| line == add) {
+                merged[i]["evidence"] = json!(format!("{}\n{}", old, add));
+            }
         } else {
             index.insert(rid, merged.len());
             merged.push(f);
@@ -810,6 +858,51 @@ mod tests {
             "perf-render-blocking", "perf-cls-img", "sec-autocomplete-sensitive"] {
             assert!(ids.contains(&expect), "missing {}", expect);
         }
+    }
+
+    #[test]
+    fn nested_label_associates_input() {
+        let html = r#"<label>搜索<input name="q"></label><input name="unlabeled">"#;
+        let issues = scan_html(html, "http://localhost/");
+        let issue = issues.iter().find(|f| f["ruleId"] == "ui-input-no-label").unwrap();
+        assert!(issue["evidence"].as_str().unwrap().contains("1 个"));
+        assert!(issue["evidence"].as_str().unwrap().contains("unlabeled"));
+    }
+
+    #[test]
+    fn get_form_discovery_stays_same_origin_and_skips_post() {
+        let html = r#"<form><input name="q"></form>
+            <form method="post"><input name="password" type="password"></form>
+            <form action="https://other.example/search"><input name="q"></form>
+            <form action="/search" method="get"><input name="term"></form>"#;
+        assert_eq!(get_form_probe_urls(html, "http://localhost/products"), vec![
+            "http://localhost/products?q="
+        ]);
+    }
+
+    #[test]
+    fn sqlite_error_signatures_match() {
+        assert!(re_sqlerr().is_match("数据库异常：unrecognized token: &quot;&#39;&quot;"));
+        assert!(!re_sqlerr().is_match("正常搜索结果"));
+    }
+
+    #[tokio::test]
+    async fn sqli_probe_compares_with_baseline() {
+        use axum::{extract::Query, routing::get, Router};
+        let app = Router::new()
+            .route("/vulnerable", get(|Query(q): Query<HashMap<String, String>>| async move {
+                if q.get("q").is_some_and(|v| v.contains('\'')) { "unrecognized token:" } else { "ok" }
+            }))
+            .route("/baseline_error", get(|| async { "unrecognized token:" }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let detected = probe_active(&client, &format!("http://{addr}/vulnerable?q=hello")).await;
+        assert!(detected.iter().any(|f| f["ruleId"] == "sec-sqli-error-based"));
+        let existing = probe_active(&client, &format!("http://{addr}/baseline_error?q=hello")).await;
+        assert!(!existing.iter().any(|f| f["ruleId"] == "sec-sqli-error-based"));
+        server.abort();
     }
 
     #[test]

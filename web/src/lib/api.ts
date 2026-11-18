@@ -8,6 +8,7 @@ export async function api<T = any>(path: string, body?: unknown): Promise<T> {
   let data: any;
   try { data = JSON.parse(text); } catch { data = text; }
   if (!r.ok) throw new Error(data?.error || `请求失败（${r.status}）`);
+  if (path === '/api/ai/analyze' && data?.knowledgeAdded > 0) window.dispatchEvent(new Event('wf-knowledge-updated'));
   return data as T;
 }
 

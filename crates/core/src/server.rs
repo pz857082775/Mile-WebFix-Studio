@@ -197,6 +197,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/patch", post(api_patch))
         .route("/api/report", post(api_report))
         .route("/api/rules", get(|| async { json_ok(json!({ "rules": kb::rules_json() })) }))
+        .route("/api/kb/learned", get(|| async {
+            match kb::learned_entries() { Ok(entries) => json_ok(json!({ "entries": entries })), Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e) }
+        }))
         .route("/api/ai/config", get(ai_config_get).post(ai_config_post))
         .route("/api/ai/test", post(ai_test))
         .route("/api/ai/models", post(ai_models))
@@ -266,7 +269,7 @@ async fn proxy_handler(State(state): State<Arc<AppState>>, req: axum::extract::R
 
 // ---- 单页体检 / 爬行 ----
 // 复用巡检登录态 / 手动 Cookie / Authorization，构建带鉴权的 HTTP 客户端（登录墙后页面可扫）
-async fn auth_clients(state: &AppState, v: &serde_json::Value, url: &url::Url) -> (reqwest::Client, reqwest::Client) {
+pub(crate) async fn auth_clients(state: &AppState, v: &serde_json::Value, url: &url::Url) -> (reqwest::Client, reqwest::Client) {
     let mut cookie = v["cookie"].as_str().unwrap_or("").trim().to_string();
     let mut authz = v["authorization"].as_str().unwrap_or("").trim().to_string();
     if v["useSession"].as_bool().unwrap_or(true) && (cookie.is_empty() || authz.is_empty()) {
@@ -516,7 +519,14 @@ async fn ai_models(State(state): State<Arc<AppState>>, body: Bytes) -> Response 
 async fn ai_analyze(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
     match crate::ai::analyze(&state.manual, &v).await {
-        Ok(r) => json_ok(r),
+        Ok(mut r) => {
+            let findings = r["findings"].as_array().cloned().unwrap_or_default();
+            match kb::save_learned(&findings, r["model"].as_str().unwrap_or("")) {
+                Ok(added) => r["knowledgeAdded"] = json!(added),
+                Err(e) => r["knowledgeError"] = json!(e),
+            }
+            json_ok(r)
+        }
         Err(e) => json_err(StatusCode::BAD_GATEWAY, e),
     }
 }
@@ -694,8 +704,9 @@ async fn orch_run(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let v = match parse_body(&body) { Ok(v) => v, Err(r) => return r };
     let url = v["url"].as_str().filter(|u| !u.is_empty())
         .or_else(|| v["input"]["url"].as_str().filter(|u| !u.is_empty()));
-    if let Some(e) = target_auth_error(url, v["authorized"].as_bool().unwrap_or(false)) {
-        return json_err(StatusCode::BAD_REQUEST, e);
+    let Some(raw_url) = url else { return json_err(StatusCode::BAD_REQUEST, "缺少编排目标网址") };
+    if let Err(response) = auth_gate(Some(raw_url), v["authorized"].as_bool().unwrap_or(false)) {
+        return response;
     }
     let pipeline = if v["pipeline"].is_object() { Some(v["pipeline"].clone()) } else { None };
     match orchestrator::start_pipeline(
@@ -703,6 +714,8 @@ async fn orch_run(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
         v["pipelineId"].as_str().filter(|s| !s.is_empty()),
         pipeline.as_ref(),
         url.unwrap_or(""),
+        v["useSession"].as_bool().unwrap_or(true),
+        v["inspectSid"].as_str().unwrap_or(""),
     ).await {
         Ok(id) => json_ok(json!({ "id": id })),
         Err(e) => json_err(StatusCode::BAD_REQUEST, e),

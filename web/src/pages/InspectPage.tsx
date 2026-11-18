@@ -3,6 +3,7 @@ import { api, isLocalUrl } from '../lib/api';
 import { EV_LABEL, findingKey, fmtTime, summaryOf } from '../lib/format';
 import type { CaptureEvent, Finding, InspectSession, Rule } from '../lib/types';
 import { FindingCard } from '../components/FindingCard';
+import { FindingFilters, emptyFindingFilter, matchesFinding } from '../components/FindingFilters';
 import { SummaryBar } from '../components/SummaryBar';
 import { useToast } from '../components/Toast';
 import { PageHeader } from '../components/PageHeader';
@@ -23,6 +24,7 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
   const [session, setSession] = useState<InspectSession | null>(null);
   const [events, setEvents] = useState<CaptureEvent[]>([]);
   const [findings, setFindings] = useState<Map<string, Finding>>(new Map());
+  const [filter, setFilter] = useState(emptyFindingFilter);
   const [status, setStatus] = useState('');
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
@@ -103,6 +105,17 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
               title: rule?.title || issue.ruleId,
               category: rule?.category || 'ui', severity: rule?.severity || 'medium',
             }, ev.realUrl || '');
+          }
+        } else {
+          const ruleId = ev.type === 'exception' ? 'func-js-exception'
+            : ev.type === 'network' ? 'func-network-error'
+            : ev.type === 'resource' ? 'func-resource-error'
+            : ev.type === 'console' && ev.level === 'error' ? 'func-console-error'
+            : null;
+          const rule = rulesRef.current.find((r) => r.id === ruleId);
+          if (rule) {
+            const evidence = [ev.message, ev.source, ev.stack, ev.url].filter(Boolean).join('\n');
+            addFinding({ ruleId: rule.id, title: rule.title, category: rule.category, severity: rule.severity, evidence }, ev.realUrl || '');
           }
         }
       }
@@ -355,6 +368,7 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
           </div>
         )}
         {status && <p className="text-[13px] text-ink-2 mt-2.5 animate-paneIn">{status}</p>}
+        {session && <p className="text-xs text-ink-3 mt-2">巡检会话 ID（供协同编排使用）：<code className="select-all">{session.sid}</code></p>}
         {deepBusy && deepProgress && (
           <div className="mt-2 animate-paneIn">
             <div className="meter"><i className="bg-accent transition-all duration-500" style={{ width: '100%' }} /></div>
@@ -421,7 +435,8 @@ export function InspectPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Findin
       {list.length > 0 && (
         <>
           <SummaryBar summary={summaryOf(list)} label="巡检累计发现" />
-          {list.map((f, i) => (
+          <FindingFilters value={filter} onChange={setFilter} total={list.length} count={list.filter(f => matchesFinding(f, filter)).length} />
+          {list.filter(f => matchesFinding(f, filter)).map((f, i) => (
             <FindingCard key={findingKey(f, f.url || '')} f={f} index={i} onFix={(x) => onFix(x, x.url)} />
           ))}
         </>

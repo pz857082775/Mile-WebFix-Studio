@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { api } from '../lib/api';
 import { CAT, CAT_COLOR, SEV } from '../lib/format';
 import type { Finding, Rule } from '../lib/types';
 import { PageHeader } from '../components/PageHeader';
@@ -9,6 +10,15 @@ const RULE_ICON = 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-
 export function KbPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Finding, url?: string) => void }) {
   const [q, setQ] = useState('');
   const [cat, setCat] = useState('all');
+  const [learned, setLearned] = useState<Rule[]>([]);
+  const [learnError, setLearnError] = useState('');
+  useEffect(() => {
+    const load = () => api<{ entries: Rule[] }>('/api/kb/learned').then(d => { setLearned(d.entries); setLearnError(''); }).catch(e => setLearnError(e.message));
+    void load();
+    window.addEventListener('wf-knowledge-updated', load);
+    return () => window.removeEventListener('wf-knowledge-updated', load);
+  }, []);
+  const learnedList = learned.filter(r => (cat === 'all' || r.category === cat) && (!q.trim() || (r.title + r.rootCause + r.id + (r.test || '')).toLowerCase().includes(q.trim().toLowerCase())));
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: rules.length };
@@ -50,6 +60,11 @@ export function KbPage({ rules, onFix }: { rules: Rule[]; onFix: (f: Finding, ur
         <p className="text-xs text-ink-3 mt-3">当前显示 {list.length} / {rules.length} 条</p>
       </Section>
 
+      <Section title={`AI 学习知识 · ${learnedList.length}`} desc="AI 生成，未经验证，仅作人工研判和修复参考；不代表已新增自动检测能力。">
+        {learnError && <p className="text-danger text-xs">知识库读取失败：{learnError}</p>}
+        {learnedList.length === 0 && <p className="text-xs text-ink-3">暂无匹配的 AI 知识条目。</p>}
+        {learnedList.map(r => <details key={r.id} className="border-b border-line py-2"><summary className="cursor-pointer text-sm">{r.title} · {SEV[r.severity] || r.severity}</summary><p className="text-xs text-ink-2 my-2">{r.rootCause}</p><p className="text-xs text-ink-3">{r.test}</p><button className="btn-ghost !h-8 !text-xs" onClick={() => use(r)}>在修复工作台使用</button></details>)}
+      </Section>
       <Section title={`规则与挖掘模板 · ${list.length}`} bodyClass="">
         <div className="divide-y divide-line">
           {list.map((r) => (
